@@ -1,4 +1,5 @@
 import type { VehicleParams } from "../vehicle.js";
+import { PowerCurveEditor } from "./PowerCurveEditor.tsx";
 
 interface Props {
   params: VehicleParams;
@@ -6,12 +7,12 @@ interface Props {
 }
 
 const FIELDS: { key: keyof VehicleParams; label: string; unit: string; min: number; step: number }[] = [
-  { key: "mass",       label: "Mass",          unit: "kg",  min: 100,  step: 10 },
-  { key: "peakPower",  label: "Peak Power",    unit: "W",   min: 1000, step: 5000 },
-  { key: "dragArea",   label: "Drag CdA",      unit: "m²",  min: 0.1,  step: 0.05 },
-  { key: "liftArea",   label: "Downforce ClA", unit: "m²",  min: 0,    step: 0.1 },
-  { key: "muLat",      label: "Lateral grip μ", unit: "",   min: 0.5,  step: 0.05 },
-  { key: "muLon",      label: "Long. grip μ",  unit: "",    min: 0.5,  step: 0.05 },
+  { key: "mass",      label: "Mass",           unit: "kg", min: 100,  step: 10 },
+  { key: "dragArea",  label: "Drag CdA",       unit: "m²", min: 0.1,  step: 0.05 },
+  { key: "liftArea",  label: "Downforce ClA",  unit: "m²", min: 0,    step: 0.1 },
+  { key: "muLat",     label: "Lateral grip μ", unit: "",   min: 0.5,  step: 0.05 },
+  { key: "muLon",     label: "Long. grip μ",   unit: "",   min: 0.5,  step: 0.05 },
+  { key: "tyreDragK", label: "Tyre drag k",    unit: "",   min: 0,    step: 0.01 },
 ];
 
 export function VehicleForm({ params, onChange }: Props) {
@@ -25,7 +26,7 @@ export function VehicleForm({ params, onChange }: Props) {
           </label>
           <input
             type="number"
-            value={params[key]}
+            value={params[key] as number}
             min={min}
             step={step}
             onChange={e => onChange({ ...params, [key]: parseFloat(e.target.value) || 0 })}
@@ -33,6 +34,7 @@ export function VehicleForm({ params, onChange }: Props) {
           />
         </div>
       ))}
+      <PowerCurveEditor params={params} onChange={onChange} />
     </div>
   );
 }

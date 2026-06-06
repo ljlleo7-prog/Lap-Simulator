@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import {
   initPopulation, runGeneration,
   initAnnealing, runAnnealingStep,
-  runGradientPass, runLengthPass, fitness,
+  runGradientPass, runLengthPass, runSmoothenStep, fitness,
 } from "../optimizer.js";
 import type { Offsets, AnnealState } from "../optimizer.js";
 import type { CentreSample } from "../geometry.js";
@@ -31,15 +31,21 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
   const [tempStart, setTempStart] = useState(0.5);
   const [cooling, setCooling] = useState(0.999);
   const [running, setRunning] = useState(false);
+  const [smoothRunning, setSmoothRunning] = useState(false);
   const [gen, setGen] = useState(0);
+  const [smoothTrials, setSmoothTrials] = useState(0);
   const [bestTime, setBestTime] = useState<number | null>(null);
+  const [smoothSigma, setSmoothSigma] = useState(0.04);
   const bestTimeRef = useRef<number>(Infinity);
 
-  const rafRef = useRef<number | null>(null);
+  const rafRef       = useRef<number | null>(null);
+  const smoothRafRef = useRef<number | null>(null);
   const genState  = useRef<{ pop: ReturnType<typeof initPopulation>; gen: number; best: number } | null>(null);
   const annState  = useRef<AnnealState | null>(null);
   const gradStep  = useRef(0.03);
   const bestRef   = useRef<Offsets>(seed);
+  const smoothSigmaRef = useRef(smoothSigma);
+  smoothSigmaRef.current = smoothSigma;
 
   function arrays() {
     const n = centreSamples.length;
@@ -53,12 +59,18 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
     const { xs, ys, tg } = arrays();
     const cur = bestRef.current;
 
+    const seedTime = fitness(cur, vehicle, hw, xs, ys, tg);
+    if (Number.isFinite(seedTime)) {
+      bestTimeRef.current = seedTime;
+      setBestTime(seedTime);
+    }
+
     if (model === "genetic") {
-      genState.current = { pop: initPopulation(cur, popSize, sigma), gen: 0, best: Infinity };
+      genState.current = { pop: initPopulation(cur, popSize, sigma), gen: 0, best: bestTimeRef.current };
     } else if (model === "annealing") {
       annState.current = initAnnealing(cur, vehicle, hw, xs, ys, tg, tempStart);
     } else {
-      gradStep.current = 0.03; // reset step size on (re)start
+      gradStep.current = 0.03;
     }
 
     setRunning(true);
@@ -103,12 +115,12 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
           signedK,
         );
         const candidateTime = fitness(candidate, vehicle, hw, xs, ys, tg);
-        if (candidateTime < bestTimeRef.current) {
+        if (Number.isFinite(candidateTime) && candidateTime < bestTimeRef.current) {
           bestTimeRef.current = candidateTime;
           bestRef.current = candidate;
           setBestTime(candidateTime);
+          onBestOffsets(bestRef.current, bestTimeRef.current);
         }
-        onBestOffsets(bestRef.current, bestTimeRef.current);
         gradStep.current = Math.max(0.003, gradStep.current * 0.992);
         setGen(g => g + 1);
       }
@@ -126,24 +138,49 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
 
   function reset() {
     stop();
+    stopSmoothen();
     genState.current = null;
     annState.current = null;
     bestRef.current = seed;
-    setGen(0); setBestTime(null);
+    setGen(0); setSmoothTrials(0); setBestTime(null);
   }
 
   function switchModel(m: Model) {
-    stop();  // stop current run; bestRef keeps the inherited best
+    stop();
     setModel(m);
     setGen(0);
-    // don't reset bestTime — show continuity to user
+  }
+
+  function startSmoothen() {
+    if (smoothRunning) return;
+    setSmoothRunning(true);
+
+    function tick() {
+      const { xs, ys, tg } = arrays();
+      const improved = runSmoothenStep(bestRef.current, vehicle, hw, xs, ys, tg, smoothSigmaRef.current);
+      if (improved !== null) {
+        const newTime = fitness(improved, vehicle, hw, xs, ys, tg);
+        bestRef.current = improved;
+        bestTimeRef.current = newTime;
+        setBestTime(newTime);
+        onBestOffsets(improved, newTime);
+      }
+      setSmoothTrials(t => t + 1);
+      smoothRafRef.current = requestAnimationFrame(tick);
+    }
+
+    smoothRafRef.current = requestAnimationFrame(tick);
+  }
+
+  function stopSmoothen() {
+    if (smoothRafRef.current !== null) { cancelAnimationFrame(smoothRafRef.current); smoothRafRef.current = null; }
+    setSmoothRunning(false);
   }
 
   return (
     <div style={{ padding: "12px 16px", borderBottom: "1px solid #222" }}>
       <div style={hdr}>Optimizer</div>
 
-      {/* model selector */}
       <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
         {(["gradient", "genetic", "annealing"] as Model[]).map(m => (
           <button key={m} onClick={() => switchModel(m)} style={{
@@ -156,7 +193,6 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
         ))}
       </div>
 
-      {/* shared param — not needed for gradient */}
       {model !== "gradient" && (
         <Row label="Mutation σ">
           <input type="number" value={sigma} min={0.01} max={0.5} step={0.01}
@@ -164,7 +200,6 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
         </Row>
       )}
 
-      {/* model-specific params */}
       {model === "genetic" && (
         <Row label="Population">
           <input type="number" value={popSize} min={4} max={100} step={2}
@@ -200,6 +235,26 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
           Gen {gen}
         </span>
         {bestTime !== null && <span style={{ color: "#4ade80", fontVariantNumeric: "tabular-nums" }}>{fmt(bestTime)}</span>}
+      </div>
+
+      {/* smoothen */}
+      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #1e1e1e" }}>
+        <Row label="Smooth σ">
+          <input type="range" min={0.01} max={0.2} step={0.005} value={smoothSigma}
+            onChange={e => setSmoothSigma(parseFloat(e.target.value))}
+            style={{ width: 80, accentColor: "#a855f7" }} />
+          <span style={{ fontSize: 11, color: "#888", width: 34, textAlign: "right" }}>{smoothSigma.toFixed(3)}</span>
+        </Row>
+        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+          <button onClick={smoothRunning ? stopSmoothen : startSmoothen} style={{
+            flex: 1, padding: "5px 0", border: `1px solid ${smoothRunning ? "#6d28d9" : "#7c3aed"}`,
+            background: smoothRunning ? "#2e1065" : "none", color: smoothRunning ? "#c4b5fd" : "#a855f7",
+            borderRadius: 4, cursor: "pointer", fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+          }}>{smoothRunning ? "STOP" : "SMOOTHEN"}</button>
+        </div>
+        <div style={{ marginTop: 6, fontSize: 11, color: "#555" }}>
+          Trials {smoothTrials}
+        </div>
       </div>
     </div>
   );

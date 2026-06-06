@@ -11,7 +11,7 @@ import {
   centreSamplesToTrackPoints,
   computeHalfWidths,
 } from "./geometry.js";
-import { simulate } from "./integrator.js";
+import { simulate, simulateHotLap } from "./integrator.js";
 import { offsetsToTrackPoints } from "./optimizer.js";
 import type { CrossSection, RacingLineSample } from "./geometry.js";
 import type { VehicleParams } from "./vehicle.js";
@@ -30,8 +30,23 @@ const DEFAULT_SECTIONS: CrossSection[] = [
 ];
 
 const DEFAULT_VEHICLE: VehicleParams = {
-  mass: 700, peakPower: 450_000, dragArea: 0.9,
-  liftArea: 3.0, muLat: 1.8, muLon: 1.8,
+  mass: 700,
+  dragArea: 0.9,
+  liftArea: 3.0,
+  muLat: 1.8,
+  muLon: 1.8,
+  tyreDragK: 0.05,
+  curveMode: "torque",
+  finalDrive: 8.5,
+  wheelRadius: 0.33,
+  powerCurve: [
+    { x: 2000, y: 300 },
+    { x: 4000, y: 380 },
+    { x: 6000, y: 420 },
+    { x: 8000, y: 400 },
+    { x: 10000, y: 340 },
+    { x: 12000, y: 250 },
+  ],
 };
 
 function formatLapTime(t: number): string {
@@ -68,10 +83,12 @@ export default function App() {
   const [bgImageUrl, setBgImageUrl] = useState<string | null>(null);
   const [bgOpacity, setBgOpacity] = useState(1);
   const [imageRect, setImageRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const [calibMode, setCalibMode] = useState(false);
+  const [calibMode, setCalibMode] = useState<"off" | "point" | "distance">("off");
   const [showGrid, setShowGrid] = useState(false);
   const [gridSize, setGridSize] = useState<50 | 100>(50);
   const [editLineMode, setEditLineMode] = useState(false);
+  const [handleStride, setHandleStride] = useState(5);
+  const [gaussianWidth, setGaussianWidth] = useState(0.08);
 
   // committed chain — cheap, runs on pointerup only
   const segments = useMemo(() => buildBezierSegments(committedSections, true), [committedSections]);
@@ -98,7 +115,7 @@ export default function App() {
 
   function runSim() {
     if (trackPoints.length < 2) return;
-    setResult(simulate(vehicle, trackPoints));
+    setResult(simulateHotLap(vehicle, trackPoints));
   }
 
   function handleImageFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -136,6 +153,31 @@ export default function App() {
     setUseOptLine(false);
   }, []);
 
+  const handleDistanceCalib = useCallback((knownMetres: number) => {
+    const currentLen = trackPoints[trackPoints.length - 1]?.distance;
+    if (!currentLen || currentLen <= 0) return;
+    const scale = knownMetres / currentLen;
+    const xs = committedSections.map(s => s.x);
+    const ys = committedSections.map(s => s.y);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const scaled = committedSections.map(s => ({
+      ...s,
+      x: cx + (s.x - cx) * scale,
+      y: cy + (s.y - cy) * scale,
+    }));
+    handleCommitSections(scaled);
+    if (imageRect) {
+      setImageRect({
+        x: cx + (imageRect.x - cx) * scale,
+        y: cy + (imageRect.y - cy) * scale,
+        w: imageRect.w * scale,
+        h: imageRect.h * scale,
+      });
+    }
+    setCalibMode("off");
+  }, [trackPoints, committedSections, imageRect, handleCommitSections]);
+
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0f0f0f", color: "#e0e0e0", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
       <aside style={{ width: 300, display: "flex", flexDirection: "column", borderRight: "1px solid #1e1e1e", overflowY: "auto", flexShrink: 0 }}>
@@ -148,8 +190,11 @@ export default function App() {
         <IoPanel
           sections={committedSections}
           vehicle={vehicle}
+          racingLineOffsets={optOffsets}
+          centreSamples={centreSamples}
           onImportTrack={s => handleCommitSections(s)}
           onImportVehicle={setVehicle}
+          onImportRacingLine={handleBestOffsets}
         />
         <OptimizerPanel
           centreSamples={centreSamples}
@@ -184,8 +229,13 @@ export default function App() {
             }}
           >{useOptLine ? "OPTIMISED LINE ✓" : "CENTRE LINE"}</button>
           {result && (
-            <div style={{ textAlign: "center", marginTop: 10, fontSize: 22, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#60a5fa" }}>
-              {formatLapTime(result.lapTime)}
+            <div style={{ textAlign: "center", marginTop: 10 }}>
+              <div style={{ fontSize: 22, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#60a5fa" }}>
+                {formatLapTime(result.lapTime)}
+              </div>
+              <div style={{ fontSize: 12, color: "#555", marginTop: 2, fontVariantNumeric: "tabular-nums" }}>
+                {(trackPoints[trackPoints.length - 1]?.distance / 1000).toFixed(3)} km
+              </div>
             </div>
           )}
         </div>
@@ -202,10 +252,14 @@ export default function App() {
               onChange={e => setBgOpacity(Number(e.target.value) / 100)}
               title="Image opacity" style={{ width: 70, accentColor: "#3b82f6" }} />
             <button
-              onClick={() => setCalibMode(v => !v)}
-              style={{ padding: "4px 8px", background: "none", border: `1px solid ${calibMode ? "#facc15" : "#333"}`, color: calibMode ? "#facc15" : "#888", borderRadius: 4, cursor: "pointer", fontSize: 11 }}
+              onClick={() => setCalibMode(v => v === "point" ? "off" : "point")}
+              style={{ padding: "4px 8px", background: "none", border: `1px solid ${calibMode === "point" ? "#facc15" : "#333"}`, color: calibMode === "point" ? "#facc15" : "#888", borderRadius: 4, cursor: "pointer", fontSize: 11 }}
             >Calibrate</button>
           </>}
+          <button
+            onClick={() => setCalibMode(v => v === "distance" ? "off" : "distance")}
+            style={{ padding: "4px 8px", background: "none", border: `1px solid ${calibMode === "distance" ? "#34d399" : "#333"}`, color: calibMode === "distance" ? "#34d399" : "#888", borderRadius: 4, cursor: "pointer", fontSize: 11 }}
+          >Dist Cal</button>
           <button
             onClick={() => setShowGrid(v => !v)}
             style={{ padding: "4px 8px", background: "none", border: `1px solid ${showGrid ? "#3b82f6" : "#333"}`, color: showGrid ? "#60a5fa" : "#888", borderRadius: 4, cursor: "pointer", fontSize: 11 }}
@@ -221,6 +275,20 @@ export default function App() {
             onClick={() => setEditLineMode(v => !v)}
             style={{ padding: "4px 8px", background: "none", border: `1px solid ${editLineMode ? "#a855f7" : "#333"}`, color: editLineMode ? "#c084fc" : "#888", borderRadius: 4, cursor: "pointer", fontSize: 11 }}
           >Edit Line</button>
+          {editLineMode && <>
+            <span style={{ fontSize: 11, color: "#666" }}>Res</span>
+            <input type="range" min={1} max={20} step={1} value={handleStride}
+              onChange={e => setHandleStride(Number(e.target.value))}
+              title={`Handle every ${handleStride} samples`}
+              style={{ width: 60, accentColor: "#a855f7" }} />
+            <span style={{ fontSize: 11, color: "#888", minWidth: 16 }}>{handleStride}</span>
+            <span style={{ fontSize: 11, color: "#666" }}>Gauss</span>
+            <input type="range" min={0.01} max={0.3} step={0.01} value={gaussianWidth}
+              onChange={e => setGaussianWidth(Number(e.target.value))}
+              title={`Gaussian spread ${(gaussianWidth * 100).toFixed(0)}% of lap`}
+              style={{ width: 60, accentColor: "#a855f7" }} />
+            <span style={{ fontSize: 11, color: "#888", minWidth: 28 }}>{(gaussianWidth * 100).toFixed(0)}%</span>
+          </>}
         </div>
         <div style={{ flex: 1, minHeight: 0 }}>
           <TrackCanvas
@@ -242,9 +310,14 @@ export default function App() {
             imageRect={imageRect}
             onImageRect={setImageRect}
             calibMode={calibMode}
+            onCalibModeOff={() => setCalibMode("off")}
+            trackLength={trackPoints[trackPoints.length - 1]?.distance ?? 0}
+            onDistanceCalib={handleDistanceCalib}
             showGrid={showGrid}
             gridSize={gridSize}
             editLineMode={editLineMode}
+            handleStride={handleStride}
+            gaussianWidth={gaussianWidth}
           />
         </div>
         {result && (

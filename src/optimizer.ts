@@ -1,5 +1,5 @@
 import type { TrackPoint } from "./track.js";
-import { simulate } from "./integrator.js";
+import { simulateHotLap } from "./integrator.js";
 import type { VehicleParams } from "./vehicle.js";
 
 // offset ∈ [-0.5, 0.5] per track sample, half-widths in metres
@@ -69,9 +69,13 @@ export function offsetsToTrackPoints(
       const bx = xs[ni] + nox, by = ys[ni] + noy;
       const dax = rx - ax, day = ry - ay;
       const dbx = bx - rx, dby = by - ry;
-      const cr = Math.abs(dax * dby - day * dbx);
+      // circumradius = |PA|*|PB|*|AB| / (2 * triangle_area); cr = 2*area via cross-product
+      const pa = Math.sqrt(dax*dax + day*day);
+      const pb = Math.sqrt(dbx*dbx + dby*dby);
+      const ab = Math.sqrt((bx-ax)*(bx-ax) + (by-ay)*(by-ay));
+      const cr = Math.abs(dax * dby - day * dbx); // 2 * triangle area
       if (cr > 1e-10)
-        radius = Math.pow(Math.sqrt(dax*dax+day*day) * Math.sqrt(dbx*dbx+dby*dby), 1.5) / cr;
+        radius = (pa * pb * ab) / cr;
     }
 
     const tp = { distance: dist, radius } as TrackPoint & { _x: number; _y: number };
@@ -90,7 +94,7 @@ export function fitness(
   tangents: Float64Array,
 ): number {
   const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
-  return simulate(vehicle, pts).lapTime;
+  return simulateHotLap(vehicle, pts).lapTime;
 }
 
 export interface GenResult {
@@ -218,6 +222,40 @@ export function runGradientPass(
     // else out[i] stays as orig (copied from offsets above)
   }
   return out;
+}
+
+// Pick a random spot on the track, apply a localised Gaussian blend centred
+// there, and accept only if lap time improves. Returns the improved offsets or
+// null when the trial made no improvement.
+export function runSmoothenStep(
+  offsets: Offsets,
+  vehicle: VehicleParams,
+  hw: Float64Array,
+  xs: Float64Array,
+  ys: Float64Array,
+  tangents: Float64Array,
+  gaussianSigma: number, // fraction of n samples, e.g. 0.04
+): Offsets | null {
+  const n = offsets.length;
+  const centre = Math.floor(Math.random() * n);
+  const sigSamples = Math.max(1, gaussianSigma * n);
+  const radius = Math.ceil(sigSamples * 3);
+
+  // Build a candidate that blends only the window around `centre`.
+  const candidate = new Float64Array(offsets);
+  for (let k = -radius; k <= radius; k++) {
+    const i = (centre + k + n) % n;
+    const w = Math.exp(-(k * k) / (2 * sigSamples * sigSamples));
+    // weighted average toward the local mean of its two neighbours
+    const prev = offsets[(i - 1 + n) % n];
+    const next = offsets[(i + 1) % n];
+    const target = (prev + next) / 2;
+    candidate[i] = clamp(offsets[i] + w * (target - offsets[i]));
+  }
+
+  const f0 = fitness(offsets,   vehicle, hw, xs, ys, tangents);
+  const f1 = fitness(candidate, vehicle, hw, xs, ys, tangents);
+  return f1 < f0 ? candidate : null;
 }
 
 // Pull each offset toward the mean of its neighbours, weighted by how straight

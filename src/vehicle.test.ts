@@ -4,11 +4,19 @@ import type { VehicleParams } from "./vehicle.js";
 
 const car: VehicleParams = {
   mass: 700,
-  peakPower: 450_000, // 450 kW
   dragArea: 0.9,
   liftArea: 3.0,
   muLat: 1.8,
   muLon: 1.8,
+  tyreDragK: 0.05,
+  curveMode: "torque",
+  finalDrive: 8.5,
+  wheelRadius: 0.33,
+  powerCurve: [
+    { x: 2000, y: 300 },
+    { x: 6000, y: 420 },
+    { x: 12000, y: 250 },
+  ],
 };
 
 describe("maxLateralAccel", () => {

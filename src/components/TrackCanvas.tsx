@@ -21,10 +21,15 @@ interface Props {
   bgOpacity: number;
   imageRect: { x: number; y: number; w: number; h: number } | null;
   onImageRect: (r: { x: number; y: number; w: number; h: number }) => void;
-  calibMode: boolean;
+  calibMode: "off" | "point" | "distance";
+  onCalibModeOff: () => void;
+  trackLength: number;
+  onDistanceCalib: (metres: number) => void;
   showGrid: boolean;
   gridSize: 50 | 100;
   editLineMode: boolean;
+  handleStride: number;
+  gaussianWidth: number; // fraction of track length [0.01, 0.3]
 }
 
 function toSvgPath(pts: { x: number; y: number }[], close = false): string {
@@ -56,15 +61,14 @@ type DragMode =
 
 interface HoverInfo { sampleIndex: number }
 
-const HANDLE_STRIDE = 5;
-
 export function TrackCanvas({
   sections, committedSegments: segments, committedCentreSamples: centreSamples,
   racingLine, useOptLine, result, selectedId,
   onDrag, onCommit, onSelect,
   hw, optOffsets, onOffsetChange,
   bgImageUrl, bgOpacity, imageRect, onImageRect,
-  calibMode, showGrid, gridSize, editLineMode,
+  calibMode, onCalibModeOff, trackLength, onDistanceCalib,
+  showGrid, gridSize, editLineMode, handleStride, gaussianWidth,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -76,6 +80,7 @@ export function TrackCanvas({
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [calibPoints, setCalibPoints] = useState<{ x: number; y: number }[]>([]);
   const [calibDist, setCalibDist] = useState("");
+  const [distCalibDist, setDistCalibDist] = useState("");
 
   const edges = sections.length >= 2 && centreSamples.length > 0
     ? edgePoints(centreSamples, sections, segments)
@@ -111,6 +116,7 @@ export function TrackCanvas({
   const optOffsetsRef = useRef(optOffsets);
   const onOffsetChangeRef = useRef(onOffsetChange);
   const vbRef = useRef(vb);
+  const gaussianWidthRef = useRef(gaussianWidth);
   sectionsRef.current = sections;
   onDragRef.current = onDrag;
   onCommitRef.current = onCommit;
@@ -119,6 +125,7 @@ export function TrackCanvas({
   optOffsetsRef.current = optOffsets;
   onOffsetChangeRef.current = onOffsetChange;
   vbRef.current = vb;
+  gaussianWidthRef.current = gaussianWidth;
 
   useEffect(() => {
     const wrap = wrapRef.current!;
@@ -176,7 +183,7 @@ export function TrackCanvas({
           const updated = new Float64Array(base ?? new Float64Array(n));
           const delta = newOff - updated[i];
           const totalDist = centreSamplesRef.current[n - 1].distance;
-          const sigmaM = totalDist * 0.08;
+          const sigmaM = totalDist * gaussianWidthRef.current;
           const distI = cs.distance;
           for (let j = 0; j < n; j++) {
             let d = Math.abs(centreSamplesRef.current[j].distance - distI);
@@ -245,11 +252,12 @@ export function TrackCanvas({
   }, [result, activeLine, HOVER_THRESHOLD_SQ, hover]);
 
   const onCanvasClick = useCallback((e: React.MouseEvent) => {
-    if (calibMode) {
+    if (calibMode === "point") {
       const pt = svgCoords(e.clientX, e.clientY);
       setCalibPoints(prev => prev.length >= 2 ? [{ x: pt.x, y: pt.y }] : [...prev, { x: pt.x, y: pt.y }]);
       return;
     }
+    if (calibMode === "distance") return;
     if ((e.target as Element).tagName !== "rect") return;
     setEditingId(null);
     const pt = svgCoords(e.clientX, e.clientY);
@@ -338,7 +346,7 @@ export function TrackCanvas({
         })}
 
         {editLineMode && racingLine.map((s, i) => {
-          if (i % HANDLE_STRIDE !== 0) return null;
+          if (i % handleStride !== 0) return null;
           return (
             <circle key={`hl${i}`} cx={s.x} cy={s.y} r={u * 0.009}
               fill="#a855f7" stroke="#0f0f0f" strokeWidth={u * 0.002}
@@ -389,8 +397,8 @@ export function TrackCanvas({
               cx={sec.x} cy={sec.y} r={u * 0.012}
               fill={isEdit ? "#f59e0b" : sec.id === selectedId ? "#60a5fa" : "#3b82f6"}
               stroke="#0f0f0f" strokeWidth={u * 0.003}
-              style={{ cursor: isEdit ? "crosshair" : "grab" }}
-              onPointerDown={e => onPointerDown(e, sec.id)}
+              style={{ cursor: editLineMode ? "default" : isEdit ? "crosshair" : "grab" }}
+              onPointerDown={editLineMode ? undefined : e => onPointerDown(e, sec.id)}
             />
           );
         })}
@@ -403,10 +411,10 @@ export function TrackCanvas({
             strokeDasharray={`${u*0.008} ${u*0.004}`} opacity={0.5} />;
         })()}
 
-        {calibMode && calibPoints.map((p, i) => (
+        {calibMode === "point" && calibPoints.map((p, i) => (
           <circle key={`cp${i}`} cx={p.x} cy={p.y} r={u * 0.01} fill="#facc15" />
         ))}
-        {calibMode && calibPoints.length === 2 && <>
+        {calibMode === "point" && calibPoints.length === 2 && <>
           <line x1={calibPoints[0].x} y1={calibPoints[0].y} x2={calibPoints[1].x} y2={calibPoints[1].y}
             stroke="#facc15" strokeWidth={u * 0.002} strokeDasharray={`${u*0.006} ${u*0.004}`} />
           <foreignObject x={calibPoints[1].x + u * 0.02} y={calibPoints[1].y - u * 0.04} width={170} height={50}>
@@ -428,6 +436,38 @@ export function TrackCanvas({
             </div>
           </foreignObject>
         </>}
+
+        {calibMode === "distance" && (() => {
+          const ox = vb.minX + vb.w * 0.5;
+          const oy = vb.minY + vb.h * 0.5;
+          return (
+            <foreignObject x={ox - 130} y={oy - 44} width={260} height={88}>
+              <div style={{ background: "#111", border: "2px solid #34d399", borderRadius: 6, padding: "10px 14px" }}
+                onClick={e => e.stopPropagation()}>
+                <div style={{ fontSize: 11, color: "#34d399", marginBottom: 6, letterSpacing: 1 }}>
+                  DISTANCE CALIBRATION — current: {(trackLength / 1000).toFixed(3)} km
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    type="number" placeholder="known lap distance (m)" value={distCalibDist}
+                    onChange={e => setDistCalibDist(e.target.value)}
+                    style={{ flex: 1, fontSize: 12, background: "#1a1a1a", color: "#e0e0e0", border: "1px solid #444", borderRadius: 3, padding: "3px 6px" }}
+                    autoFocus
+                  />
+                  <button onClick={e => {
+                    e.stopPropagation();
+                    const d = parseFloat(distCalibDist);
+                    if (!d || d <= 0) return;
+                    onDistanceCalib(d);
+                    setDistCalibDist("");
+                  }} style={{ fontSize: 12, padding: "3px 8px", background: "#34d399", color: "#000", border: "none", borderRadius: 3, cursor: "pointer", fontWeight: 600 }}>Apply</button>
+                  <button onClick={e => { e.stopPropagation(); onCalibModeOff(); setDistCalibDist(""); }}
+                    style={{ fontSize: 12, padding: "3px 8px", background: "none", color: "#888", border: "1px solid #333", borderRadius: 3, cursor: "pointer" }}>✕</button>
+                </div>
+              </div>
+            </foreignObject>
+          );
+        })()}
 
         {hover && result && si >= 0 && (() => {
           const sample = activeLine[si];
