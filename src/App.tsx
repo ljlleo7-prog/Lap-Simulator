@@ -61,10 +61,10 @@ function offsetsToRacingLine(
 
 // ── shared style tokens ───────────────────────────────────────────────────────
 
-const COL_W = 280;
+const COL_W = 320;
 const colStyle: React.CSSProperties = {
   width: COL_W, flexShrink: 0, display: "flex", flexDirection: "column",
-  borderRight: "1px solid #1e1e1e", overflowY: "auto",
+  overflowY: "auto",
 };
 
 // ── session name field ────────────────────────────────────────────────────────
@@ -187,15 +187,54 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0f0f0f", color: "#e0e0e0", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
 
-      {/* ── Left column: Car Setup ── */}
-      <aside style={colStyle}>
+      {/* ── Left: Car Setup ── */}
+      <aside style={{ ...colStyle, borderRight: "1px solid #1e1e1e" }}>
         <SessionHeader title="Car Setup" name={carName} onName={setCarName} />
         <VehicleForm params={vehicle} onChange={setVehicle} />
         <CarIoPanel vehicle={vehicle} sessionName={carName} onImportVehicle={setVehicle} />
       </aside>
 
-      {/* ── Right column: Track & Optimisation ── */}
-      <aside style={colStyle}>
+      {/* ── Centre: canvas + data plots ── */}
+      <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, borderRight: "1px solid #1e1e1e" }}>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <TrackCanvas
+            sections={displaySections}
+            committedSegments={segments}
+            committedCentreSamples={centreSamples}
+            racingLine={racingLine}
+            useOptLine={useOptLine}
+            result={result}
+            selectedId={selectedId}
+            onDrag={handleDragSections}
+            onCommit={handleCommitSections}
+            onSelect={setSelectedId}
+            hw={hw}
+            optOffsets={optOffsets}
+            onOffsetChange={handleBestOffsets}
+            bgImageUrl={bgImageUrl}
+            bgOpacity={bgOpacity}
+            imageRect={imageRect}
+            onImageRect={setImageRect}
+            calibMode={calibMode}
+            onCalibModeOff={() => setCalibMode("off")}
+            trackLength={trackPoints[trackPoints.length - 1]?.distance ?? 0}
+            onDistanceCalib={handleDistanceCalib}
+            showGrid={showGrid}
+            gridSize={gridSize}
+            editLineMode={editLineMode}
+            handleStride={handleStride}
+            gaussianWidth={gaussianWidth}
+          />
+        </div>
+        {result && (
+          <div style={{ height: 220, borderTop: "1px solid #1e1e1e", flexShrink: 0 }}>
+            <Results result={result} />
+          </div>
+        )}
+      </main>
+
+      {/* ── Right: Track & Optimisation ── */}
+      <aside style={{ ...colStyle, borderLeft: "1px solid #1e1e1e" }}>
         <SessionHeader title="Track & Opt" name={trackName} onName={setTrackName} />
 
         {/* canvas toolbar */}
@@ -242,7 +281,7 @@ export default function App() {
         />
 
         {/* run + lap time */}
-        <div style={{ padding: "12px 14px", borderBottom: "1px solid #1e1e1e" }}>
+        <div style={{ padding: "12px 14px", marginTop: "auto", borderTop: "1px solid #1e1e1e" }}>
           {hasInvalid && <div style={{ color: "#ef4444", fontSize: 11, marginBottom: 6 }}>Invalid segments (shown in red).</div>}
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <button onClick={runSim} disabled={hasInvalid || trackPoints.length < 2} style={{
@@ -268,58 +307,7 @@ export default function App() {
             </div>
           )}
         </div>
-
-        {/* results charts — collapsible */}
-        {result && (
-          <div style={{ borderBottom: "1px solid #1e1e1e" }}>
-            <button onClick={() => setShowResults(v => !v)} style={{
-              width: "100%", background: "none", border: "none", color: "#555",
-              fontSize: 10, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase",
-              cursor: "pointer", padding: "7px 14px", textAlign: "left", display: "flex",
-              justifyContent: "space-between",
-            }}>
-              Data plots <span>{showResults ? "▲" : "▼"}</span>
-            </button>
-            {showResults && (
-              <div style={{ height: 260 }}>
-                <Results result={result} />
-              </div>
-            )}
-          </div>
-        )}
       </aside>
-
-      {/* ── Canvas ── */}
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        <TrackCanvas
-          sections={displaySections}
-          committedSegments={segments}
-          committedCentreSamples={centreSamples}
-          racingLine={racingLine}
-          useOptLine={useOptLine}
-          result={result}
-          selectedId={selectedId}
-          onDrag={handleDragSections}
-          onCommit={handleCommitSections}
-          onSelect={setSelectedId}
-          hw={hw}
-          optOffsets={optOffsets}
-          onOffsetChange={handleBestOffsets}
-          bgImageUrl={bgImageUrl}
-          bgOpacity={bgOpacity}
-          imageRect={imageRect}
-          onImageRect={setImageRect}
-          calibMode={calibMode}
-          onCalibModeOff={() => setCalibMode("off")}
-          trackLength={trackPoints[trackPoints.length - 1]?.distance ?? 0}
-          onDistanceCalib={handleDistanceCalib}
-          showGrid={showGrid}
-          gridSize={gridSize}
-          editLineMode={editLineMode}
-          handleStride={handleStride}
-          gaussianWidth={gaussianWidth}
-        />
-      </main>
     </div>
   );
 }

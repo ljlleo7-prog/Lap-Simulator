@@ -25,9 +25,19 @@ export function SectionTable({ sections, selectedId, onChange, onSelect }: Props
     if (selectedId === id) onSelect(null);
   }
 
+  function reverse() {
+    onChange([...sections].reverse().map(s => ({ ...s, direction: (s.direction + 180) % 360 })));
+  }
+
   return (
     <div style={panel}>
-      <div style={panelHeader}>Track Sections</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={panelHeader}>Track Sections</div>
+        <button onClick={reverse} title="Reverse track direction" style={{
+          background: "none", border: "1px solid #333", color: "#aaa",
+          padding: "3px 10px", borderRadius: 4, cursor: "pointer", fontSize: 11,
+        }}>⇄ Reverse</button>
+      </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
           <thead>
@@ -75,7 +85,7 @@ export function SectionTable({ sections, selectedId, onChange, onSelect }: Props
 }
 
 const panel: React.CSSProperties = { padding: "12px 16px", borderBottom: "1px solid #222" };
-const panelHeader: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: 1, color: "#888", textTransform: "uppercase", marginBottom: 10 };
+const panelHeader: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: 1, color: "#888", textTransform: "uppercase", margin: 0 };
 const th: React.CSSProperties = { textAlign: "left", padding: "4px 6px", color: "#666", fontWeight: 400 };
 const td: React.CSSProperties = { padding: "2px 4px" };
 const numInput: React.CSSProperties = { width: 58, background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", padding: "2px 4px", borderRadius: 3, fontSize: 12 };
