@@ -1,6 +1,9 @@
+import { useState } from "react";
 import type { CrossSection, CentreSample } from "../geometry.js";
 import type { VehicleParams } from "../vehicle.js";
 import type { Offsets } from "../optimizer.js";
+
+// ── file helpers ──────────────────────────────────────────────────────────────
 
 function download(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -13,25 +16,21 @@ function download(filename: string, data: unknown) {
 
 function upload(onLoad: (data: unknown) => void) {
   const input = document.createElement("input");
-  input.type = "file";
-  input.accept = ".json";
+  input.type = "file"; input.accept = ".json";
   input.onchange = () => {
-    const file = input.files?.[0];
-    if (!file) return;
+    const file = input.files?.[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
-      try { onLoad(JSON.parse(reader.result as string)); } catch { /* ignore */ }
-    };
+    reader.onload = () => { try { onLoad(JSON.parse(reader.result as string)); } catch { /* ignore */ } };
     reader.readAsText(file);
   };
   input.click();
 }
 
-// Migrate a legacy vehicle JSON that has peakPower but no powerCurve.
+// ── migration helpers ─────────────────────────────────────────────────────────
+
 function migrateVehicle(raw: Record<string, unknown>): VehicleParams {
   if (!raw.powerCurve && typeof raw.peakPower === "number") {
-    // Build a flat power curve: constant kW across the speed range
-    const kw = raw.peakPower as number / 1000;
+    const kw = (raw.peakPower as number) / 1000;
     return {
       mass: (raw.mass as number) ?? 700,
       dragArea: (raw.dragArea as number) ?? 0.9,
@@ -40,17 +39,12 @@ function migrateVehicle(raw: Record<string, unknown>): VehicleParams {
       muLon: (raw.muLon as number) ?? 1.8,
       tyreDragK: (raw.tyreDragK as number) ?? 0.05,
       curveMode: "power",
-      powerCurve: [
-        { x: 0,   y: kw },
-        { x: 100, y: kw },
-        { x: 300, y: kw },
-      ],
+      powerCurve: [{ x: 0, y: kw }, { x: 100, y: kw }, { x: 300, y: kw }],
     };
   }
   return raw as unknown as VehicleParams;
 }
 
-// Normalise track import: accept bare array or {sections:[...]} wrapper.
 function migrateTrack(raw: unknown): CrossSection[] {
   if (Array.isArray(raw)) return raw as CrossSection[];
   if (raw && typeof raw === "object") {
@@ -60,103 +54,106 @@ function migrateTrack(raw: unknown): CrossSection[] {
   return [];
 }
 
+// ── racing line file format ───────────────────────────────────────────────────
+
 interface RacingLineFile {
   version: 1;
   sampleCount: number;
-  trackLength: number; // metres, rounded to 1 decimal for fingerprint
-  offsets: number[];   // Float64Array serialised as plain array
+  trackLength: number;
+  offsets: number[];
 }
 
-export function exportRacingLine(offsets: Offsets, centreSamples: CentreSample[]): void {
+export function exportRacingLine(offsets: Offsets, centreSamples: CentreSample[], name: string) {
   const trackLength = centreSamples.length > 0
-    ? Math.round(centreSamples[centreSamples.length - 1].distance * 10) / 10
-    : 0;
-  const file: RacingLineFile = {
-    version: 1,
-    sampleCount: offsets.length,
-    trackLength,
-    offsets: Array.from(offsets),
-  };
-  download("racing-line.json", file);
+    ? Math.round(centreSamples[centreSamples.length - 1].distance * 10) / 10 : 0;
+  const file: RacingLineFile = { version: 1, sampleCount: offsets.length, trackLength, offsets: Array.from(offsets) };
+  download(`${name || "racing-line"}.json`, file);
 }
 
-// Returns the loaded offsets, or an error string if validation fails.
-export function importRacingLine(
-  raw: unknown,
-  centreSamples: CentreSample[],
-): Float64Array | string {
+export function importRacingLine(raw: unknown, centreSamples: CentreSample[]): Float64Array | string {
   if (!raw || typeof raw !== "object") return "Invalid file format.";
   const f = raw as Record<string, unknown>;
   if (f.version !== 1) return "Unknown racing line file version.";
   if (!Array.isArray(f.offsets)) return "Missing offsets array.";
-
   const expectedCount = centreSamples.length;
   const expectedLength = centreSamples.length > 0
-    ? Math.round(centreSamples[centreSamples.length - 1].distance * 10) / 10
-    : 0;
-
-  if (f.sampleCount !== expectedCount) {
+    ? Math.round(centreSamples[centreSamples.length - 1].distance * 10) / 10 : 0;
+  if (f.sampleCount !== expectedCount)
     return `Sample count mismatch: file has ${f.sampleCount}, track has ${expectedCount}. Load the matching track first.`;
-  }
-  // Allow 0.5 m tolerance on track length
-  if (Math.abs((f.trackLength as number) - expectedLength) > 0.5) {
+  if (Math.abs((f.trackLength as number) - expectedLength) > 0.5)
     return `Track length mismatch: file is ${f.trackLength} m, current track is ${expectedLength} m.`;
-  }
-
   return new Float64Array(f.offsets as number[]);
 }
 
-interface Props {
-  sections: CrossSection[];
+// ── Car Setup I/O panel ───────────────────────────────────────────────────────
+
+interface CarIoProps {
   vehicle: VehicleParams;
+  sessionName: string;
+  onImportVehicle: (v: VehicleParams) => void;
+}
+
+export function CarIoPanel({ vehicle, sessionName, onImportVehicle }: CarIoProps) {
+  const name = sessionName.trim() || "vehicle";
+  return (
+    <div style={section}>
+      <div style={hdr}>Files</div>
+      <Row label="Vehicle"
+        onExport={() => download(`${name}.json`, vehicle)}
+        onImport={() => upload(d => onImportVehicle(migrateVehicle(d as Record<string, unknown>)))}
+      />
+    </div>
+  );
+}
+
+// ── Track & Opt I/O panel ─────────────────────────────────────────────────────
+
+interface TrackIoProps {
+  sections: CrossSection[];
   racingLineOffsets: Offsets | null;
   centreSamples: CentreSample[];
+  sessionName: string;
   onImportTrack: (s: CrossSection[]) => void;
-  onImportVehicle: (v: VehicleParams) => void;
   onImportRacingLine: (offsets: Float64Array) => void;
 }
 
-export function IoPanel({
-  sections, vehicle, racingLineOffsets, centreSamples,
-  onImportTrack, onImportVehicle, onImportRacingLine,
-}: Props) {
+export function TrackIoPanel({
+  sections, racingLineOffsets, centreSamples, sessionName,
+  onImportTrack, onImportRacingLine,
+}: TrackIoProps) {
+  const trackName = sessionName.trim() || "track";
+
   function handleRacingLineImport(raw: unknown) {
     const result = importRacingLine(raw, centreSamples);
-    if (typeof result === "string") {
-      alert(result);
-    } else {
-      onImportRacingLine(result);
-    }
+    if (typeof result === "string") alert(result);
+    else onImportRacingLine(result);
   }
 
   return (
-    <div style={{ padding: "12px 16px", borderBottom: "1px solid #222" }}>
-      <div style={hdr}>Data</div>
+    <div style={section}>
+      <div style={hdr}>Files</div>
       <Row label="Track"
-        onExport={() => download("track.json", sections)}
+        onExport={() => download(`${trackName}.json`, sections)}
         onImport={() => upload(d => onImportTrack(migrateTrack(d)))}
       />
-      <Row label="Vehicle"
-        onExport={() => download("vehicle.json", vehicle)}
-        onImport={() => upload(d => onImportVehicle(migrateVehicle(d as Record<string, unknown>)))}
-      />
-      <Row
-        label="Racing line"
+      <Row label="Racing line"
         exportDisabled={!racingLineOffsets}
-        onExport={() => racingLineOffsets && exportRacingLine(racingLineOffsets, centreSamples)}
+        onExport={() => racingLineOffsets && exportRacingLine(racingLineOffsets, centreSamples, trackName)}
         onImport={() => upload(handleRacingLineImport)}
       />
     </div>
   );
 }
 
+// ── shared primitives ─────────────────────────────────────────────────────────
+
 function Row({ label, onExport, onImport, exportDisabled = false }: {
   label: string; onExport: () => void; onImport: () => void; exportDisabled?: boolean;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-      <span style={{ fontSize: 12, color: "#aaa" }}>{label}</span>
-      <div style={{ display: "flex", gap: 6 }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+      <span style={{ fontSize: 11, color: "#aaa" }}>{label}</span>
+      <div style={{ display: "flex", gap: 5 }}>
         <Btn onClick={onImport}>Import</Btn>
         <Btn onClick={onExport} disabled={exportDisabled}>Export</Btn>
       </div>
@@ -168,9 +165,10 @@ function Btn({ onClick, children, disabled = false }: { onClick: () => void; chi
   return (
     <button onClick={onClick} disabled={disabled} style={{
       background: "none", border: "1px solid #333", color: disabled ? "#333" : "#aaa",
-      padding: "3px 10px", borderRadius: 3, cursor: disabled ? "default" : "pointer", fontSize: 11,
+      padding: "2px 8px", borderRadius: 3, cursor: disabled ? "default" : "pointer", fontSize: 11,
     }}>{children}</button>
   );
 }
 
-const hdr: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: 1, color: "#888", textTransform: "uppercase", marginBottom: 10 };
+const section: React.CSSProperties = { padding: "10px 14px", borderBottom: "1px solid #1e1e1e" };
+const hdr: React.CSSProperties = { fontSize: 10, fontWeight: 600, letterSpacing: 1, color: "#555", textTransform: "uppercase", marginBottom: 8 };
