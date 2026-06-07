@@ -9,13 +9,20 @@ interface Props {
 
 // ── Presets ───────────────────────────────────────────────────────────────────
 
-const PRESETS: { label: string; values: VehicleParams }[] = [
+const PRESETS: { label: string; description: string; values: VehicleParams }[] = [
   {
     label: "— preset —",
+    description: "",
     values: {} as VehicleParams,
   },
   {
     label: "Shifter Kart",
+    description:
+      "125cc gearbox kart (ICC/KZ class). Spool rear axle — no differential, both rear wheels driven together. " +
+      "This generates large tyre drag at tight hairpins (tyreDragK 0.22) and can unload the inside rear under combined braking and cornering. " +
+      "Brake bias is rear-only (0%) because karts have no front brakes. " +
+      "Setup tip: if the sim shows the kart losing too much time in hairpins vs reality, try reducing tyreDragK toward 0.15. " +
+      "Peak power ~28 Nm @ 10000 RPM ≈ 29 kW; very rev-dependent, drops off sharply below 7000 RPM.",
     values: {
       mass: 165, dragArea: 0.35, liftArea: 0.0,
       muLat: 1.7, muLon: 1.7, tyreDragK: 0.22,
@@ -29,7 +36,34 @@ const PRESETS: { label: string; values: VehicleParams }[] = [
     },
   },
   {
+    label: "Entertainment Kart (200cc)",
+    description:
+      "Adult rental / entertainment kart — e.g. 丰速200cc, RT8-class single-speed karts. " +
+      "Single-speed spool axle, governed to ~60–80 km/h. Much heavier and less grippy than shifter karts. " +
+      "tyreDragK is higher (0.28) because rental kart tyres run at higher slip angles and often on worn compound. " +
+      "Brake bias rear-only (0%) same as all karts. " +
+      "Setup tip: 丰速/RT8 tracks are typically tight with short straights — the optimizer will strongly favour apex widening. " +
+      "Reducing muLat toward 1.4–1.5 better matches worn rental tyre grip. Peak ~9 kW.",
+    values: {
+      mass: 200, dragArea: 0.38, liftArea: 0.0,
+      muLat: 1.55, muLon: 1.55, tyreDragK: 0.28,
+      curveMode: "power", finalDrive: 10.0, wheelRadius: 0.215,
+      drivetrainLayout: "RWD", brakeBias: 0.0, diffLockRear: 1.0, diffLockFront: 0.0,
+      weightDistFront: 0.42, wheelbase: 1.05, trackWidth: 1.35, cgHeight: 0.29,
+      powerCurve: [
+        { x: 0, y: 7 }, { x: 30, y: 9 }, { x: 50, y: 9 },
+        { x: 70, y: 7 }, { x: 85, y: 4 },
+      ],
+    },
+  },
+  {
     label: "Formula Car",
+    description:
+      "Open-wheel formula car (F3 / F4 class). High downforce (ClA 4.5 m²) means grip improves significantly at speed — " +
+      "corner speeds on fast sweepers are much higher than on slow hairpins despite the same μ. " +
+      "Rear-limited traction (RWD, 30% diff lock). Brake bias 62% front is typical for a well-balanced setup. " +
+      "Setup tip: increase liftArea to explore higher-downforce aero configs. " +
+      "Reducing tyreDragK below 0.05 approximates a very clean aero-tyre package.",
     values: {
       mass: 750, dragArea: 1.1, liftArea: 4.5,
       muLat: 2.0, muLon: 2.0, tyreDragK: 0.06,
@@ -44,6 +78,12 @@ const PRESETS: { label: string; values: VehicleParams }[] = [
   },
   {
     label: "GT Car",
+    description:
+      "GT3 / endurance-class GT car. Heavier than formula, moderate downforce. " +
+      "50% rear diff lock models a plated LSD in partial lock. Brake bias 58% front is rear-biased vs formula " +
+      "to help rotation on entry. " +
+      "Setup tip: CGHeight 0.45 m makes this sensitive to weight transfer — " +
+      "raising brakeBias toward 0.62 will improve braking stability at the cost of less rotation.",
     values: {
       mass: 1350, dragArea: 0.9, liftArea: 2.0,
       muLat: 1.6, muLon: 1.6, tyreDragK: 0.07,
@@ -58,6 +98,12 @@ const PRESETS: { label: string; values: VehicleParams }[] = [
   },
   {
     label: "Road Car",
+    description:
+      "Typical FWD road car on standard tyres. Front-heavy (60% front weight), high CG. " +
+      "Low μ (1.0) reflects street-compound tyres. tyreDragK 0.04 is low — street tyres have good self-aligning torque. " +
+      "FWD means traction is front-axle limited; under power the front wheels also steer, " +
+      "so the sim will show more understeer penalty than an equivalent RWD car. " +
+      "Setup tip: to model a sports-biased road car, shift weightDistFront to 0.52 and raise muLat to 1.2.",
     values: {
       mass: 1500, dragArea: 0.7, liftArea: 0.1,
       muLat: 1.0, muLon: 1.0, tyreDragK: 0.04,
@@ -95,8 +141,11 @@ const CHASSIS_FIELDS: { key: keyof VehicleParams; label: string; unit: string; m
 
 export function VehicleForm({ params, onChange }: Props) {
   const [showChassis, setShowChassis] = React.useState(false);
+  const [selectedPreset, setSelectedPreset] = React.useState("— preset —");
+  const presetInfo = PRESETS.find(p => p.label === selectedPreset)?.description ?? "";
 
   function applyPreset(label: string) {
+    setSelectedPreset(label);
     const p = PRESETS.find(pr => pr.label === label);
     if (p && label !== "— preset —") onChange(p.values);
   }
@@ -119,13 +168,23 @@ export function VehicleForm({ params, onChange }: Props) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div style={header}>Vehicle Parameters</div>
         <select
-          value="— preset —"
+          value={selectedPreset}
           onChange={e => applyPreset(e.target.value)}
           style={{ fontSize: 11, background: "#1a1a1a", border: "1px solid #333", color: "#aaa", borderRadius: 3, padding: "2px 6px" }}
         >
           {PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
         </select>
       </div>
+
+      {presetInfo && (
+        <div style={{
+          marginBottom: 10, padding: "8px 10px", background: "#111827",
+          border: "1px solid #1f2937", borderRadius: 5,
+          fontSize: 11, lineHeight: 1.45, color: "#9ca3af",
+        }}>
+          {presetInfo}
+        </div>
+      )}
 
       {NUM_FIELDS.map(({ key, label, unit, min, step, max }) => (
         <Row key={key} label={label} unit={unit}>
