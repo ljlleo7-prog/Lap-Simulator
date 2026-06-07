@@ -194,34 +194,135 @@ export function runAnnealingStep(
   };
 }
 
-// ── Gradient descent (lap-time coordinate descent) ────────────────────────────
-
-// One full coordinate-descent pass minimising lap time directly.
-export function runGradientPass(
+// ── Geometric racing-line pass ─────────────────────────────────────────────────
+//
+// Detects corners from signed curvature, builds a deterministic out-in-out
+// late-apex template for each one, then evaluates small apex-position
+// perturbations to escape local minima.  Much more structured than random
+// mutation: the warm candidate already respects the classic racing-line shape,
+// and exploration is local to the apex region of each corner.
+//
+// signedK: signed curvature per sample (positive = left-hand bend)
+// straightLookAhead: number of samples to look ahead for exit-straight length
+export function runGeometricPass(
   offsets: Offsets,
   vehicle: VehicleParams,
   hw: Float64Array,
   xs: Float64Array,
   ys: Float64Array,
   tg: Float64Array,
-  step: number,
+  signedK: Float64Array,
+  perturbScale = 0.04, // small randomness around apex, 0 = fully deterministic
 ): Offsets {
   const n = offsets.length;
-  const snap = new Float64Array(offsets); // frozen reference for all evaluations
-  const out  = new Float64Array(offsets); // output — written only after decision
-  const f0 = fitness(snap, vehicle, hw, xs, ys, tg); // baseline once
 
+  // ── 1. Build smoothed absolute curvature for corner detection ────────────
+  const absK = new Float64Array(n);
+  const SMOOTH_W = 3;
   for (let i = 0; i < n; i++) {
-    const orig = snap[i];
-    const tryP = new Float64Array(snap); tryP[i] = clamp(orig + step);
-    const tryM = new Float64Array(snap); tryM[i] = clamp(orig - step);
-    const fp = fitness(tryP, vehicle, hw, xs, ys, tg);
-    const fm = fitness(tryM, vehicle, hw, xs, ys, tg);
-    if (fp <= fm && fp < f0)  out[i] = clamp(orig + step);
-    else if (fm < f0)         out[i] = clamp(orig - step);
-    // else out[i] stays as orig (copied from offsets above)
+    let s = 0, w = 0;
+    for (let k = -SMOOTH_W; k <= SMOOTH_W; k++) {
+      absK[i] += Math.abs(signedK[(i + k + n) % n]);
+      s += Math.abs(signedK[(i + k + n) % n]); w++;
+    }
+    absK[i] = s / w;
   }
-  return out;
+  const maxAbsK = Math.max(...Array.from(absK), 1e-9);
+
+  // ── 2. Find corner peaks (local maxima above threshold) ──────────────────
+  const PEAK_THRESH = 0.15; // fraction of maxAbsK to be called a corner
+  const MIN_GAP = Math.max(4, Math.floor(n * 0.03)); // min samples between peaks
+  const peaks: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const norm = absK[i] / maxAbsK;
+    if (norm < PEAK_THRESH) continue;
+    let isMax = true;
+    for (let k = -MIN_GAP; k <= MIN_GAP; k++) {
+      if (k === 0) continue;
+      if (absK[(i + k + n) % n] > absK[i]) { isMax = false; break; }
+    }
+    if (isMax) peaks.push(i);
+  }
+
+  // ── 3. Build candidate from deterministic out-in-out template ───────────
+  //
+  // For each corner:
+  //   - entry zone  → push toward outside of the corner
+  //   - apex        → push toward inside (the late apex, ~65% through)
+  //   - exit zone   → push back toward outside, weighted by exit-straight length
+  //
+  // "outside" for a left-hand bend (signedK > 0) is the negative-normal side
+  // (offset < 0); inside is offset > 0.  We work in signed offset space.
+
+  const candidate = new Float64Array(offsets);
+
+  // Measure exit-straight length from each sample (number of samples until
+  // curvature rises above STRAIGHT_K again).
+  const STRAIGHT_K_THRESH = 0.1 * maxAbsK;
+  function exitStraightLength(apexIdx: number, cornerHalfWidth: number): number {
+    let len = 0;
+    for (let k = 1; k < n; k++) {
+      const j = (apexIdx + k) % n;
+      if (absK[j] > STRAIGHT_K_THRESH) break;
+      len++;
+    }
+    return len;
+  }
+
+  for (const apex of peaks) {
+    const dir = Math.sign(signedK[apex]) || 1; // +1 = left bend, -1 = right bend
+    // "inside" = +dir in offset space (inside of the bend)
+    const exitLen = exitStraightLength(apex, n);
+    // longer exit straight → push exit wider, bias apex slightly later
+    const exitBias = Math.min(1, exitLen / Math.max(n * 0.1, 1));
+
+    // Half-widths of the corner zone: proportional to corner intensity
+    const normK = absK[apex] / maxAbsK;
+    const zoneHalf = Math.max(MIN_GAP, Math.floor(normK * n * 0.12));
+
+    // Late-apex position: 60-70% through the corner (later for longer exit)
+    const apexShift = Math.floor(zoneHalf * (0.1 + exitBias * 0.15));
+
+    for (let k = -zoneHalf; k <= zoneHalf; k++) {
+      const i = (apex + k + n) % n;
+      const phase = (k + zoneHalf) / (2 * zoneHalf); // 0=entry, 1=exit
+
+      // Late-apex curve: entry wide, apex at ~0.6-0.7 phase, exit wide
+      const apexPhase = 0.6 + exitBias * 0.1;
+      let insideness: number;
+      if (phase < apexPhase) {
+        // ramp from -0.45 (outside) to +0.4 (inside at apex)
+        insideness = -0.45 + (0.85 * phase / apexPhase);
+      } else {
+        // ramp from apex back to outside, faster exit push for long straights
+        const exitWidth = 0.35 + exitBias * 0.1;
+        insideness = 0.4 - exitWidth * (phase - apexPhase) / (1 - apexPhase);
+      }
+
+      // Convert to offset: inside = +dir * positive_half
+      const target = clamp(dir * insideness);
+
+      // Blend: corners dominate, straights relax — weight by local normK
+      const localNorm = absK[i] / maxAbsK;
+      const blend = Math.min(1, localNorm / PEAK_THRESH) * normK;
+      candidate[i] = clamp(candidate[i] * (1 - blend) + target * blend);
+    }
+
+    // Small perturbation around apex to explore nearby solutions
+    if (perturbScale > 0) {
+      const perturbZone = Math.max(2, Math.floor(zoneHalf * 0.4));
+      for (let k = -perturbZone; k <= perturbZone; k++) {
+        const i = (apex + apexShift + k + n) % n;
+        const noise = (Math.random() - 0.5) * 2 * perturbScale;
+        candidate[i] = clamp(candidate[i] + noise);
+      }
+    }
+  }
+
+  // ── 4. Accept only if lap time improves ─────────────────────────────────
+  const f0 = fitness(offsets,   vehicle, hw, xs, ys, tg);
+  const f1 = fitness(candidate, vehicle, hw, xs, ys, tg);
+  return f1 < f0 ? candidate : offsets;
 }
 
 // Pick a random spot on the track, apply a localised Gaussian blend centred

@@ -2,13 +2,13 @@ import { useRef, useState } from "react";
 import {
   initPopulation, runGeneration,
   initAnnealing, runAnnealingStep,
-  runGradientPass, runLengthPass, runSmoothenStep, fitness,
+  runGeometricPass, runLengthPass, runSmoothenStep, fitness,
 } from "../optimizer.js";
 import type { Offsets, AnnealState } from "../optimizer.js";
 import type { CentreSample } from "../geometry.js";
 import type { VehicleParams } from "../vehicle.js";
 
-type Model = "gradient" | "genetic" | "annealing";
+type Model = "geometric" | "genetic" | "annealing";
 
 interface Props {
   centreSamples: CentreSample[];
@@ -16,6 +16,7 @@ interface Props {
   seed: Offsets;
   vehicle: VehicleParams;
   onBestOffsets: (offsets: Offsets, lapTime: number) => void;
+  onLineReset: () => void;
 }
 
 function fmt(t: number): string {
@@ -24,8 +25,8 @@ function fmt(t: number): string {
   return m > 0 ? `${m}:${s}` : `${t.toFixed(3)}s`;
 }
 
-export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets }: Props) {
-  const [model, setModel] = useState<Model>("genetic");
+export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets, onLineReset }: Props) {
+  const [model, setModel] = useState<Model>("geometric");
   const [popSize, setPopSize] = useState(20);
   const [sigma, setSigma] = useState(0.08);
   const [tempStart, setTempStart] = useState(0.5);
@@ -42,10 +43,12 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
   const smoothRafRef = useRef<number | null>(null);
   const genState  = useRef<{ pop: ReturnType<typeof initPopulation>; gen: number; best: number } | null>(null);
   const annState  = useRef<AnnealState | null>(null);
-  const gradStep  = useRef(0.03);
   const bestRef   = useRef<Offsets>(seed);
+  const seedRef   = useRef<Offsets>(seed);
   const smoothSigmaRef = useRef(smoothSigma);
   smoothSigmaRef.current = smoothSigma;
+  // always track latest seed so reset/start can pick it up
+  seedRef.current = seed;
 
   function arrays() {
     const n = centreSamples.length;
@@ -56,6 +59,10 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
 
   function start() {
     if (running) return;
+    // always re-seed from the latest external line (picks up manual edits)
+    bestRef.current = new Float64Array(seedRef.current);
+    bestTimeRef.current = Infinity;
+
     const { xs, ys, tg } = arrays();
     const cur = bestRef.current;
 
@@ -69,14 +76,14 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
       genState.current = { pop: initPopulation(cur, popSize, sigma), gen: 0, best: bestTimeRef.current };
     } else if (model === "annealing") {
       annState.current = initAnnealing(cur, vehicle, hw, xs, ys, tg, tempStart);
-    } else {
-      gradStep.current = 0.03;
     }
 
     setRunning(true);
 
+    let tickCount = 0;
     function tick() {
       const { xs, ys, tg } = arrays();
+      tickCount++;
 
       if (model === "genetic" && genState.current) {
         const { population, best, bestLapTime } = runGeneration(genState.current.pop, vehicle, hw, xs, ys, tg, sigma);
@@ -100,7 +107,7 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
           setBestTime(bestFitness);
         }
         setGen(g => g + 1);
-      } else if (model === "gradient") {
+      } else if (model === "geometric") {
         const n = centreSamples.length;
         const signedK = new Float64Array(n);
         for (let i = 0; i < n; i++) {
@@ -110,18 +117,26 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
           while (da < -Math.PI) da += 2 * Math.PI;
           signedK[i] = da / (next.distance - prev.distance || 0.01);
         }
-        const candidate = runLengthPass(
-          runGradientPass(bestRef.current, vehicle, hw, xs, ys, tg, gradStep.current),
-          signedK,
-        );
-        const candidateTime = fitness(candidate, vehicle, hw, xs, ys, tg);
-        if (Number.isFinite(candidateTime) && candidateTime < bestTimeRef.current) {
-          bestTimeRef.current = candidateTime;
-          bestRef.current = candidate;
-          setBestTime(candidateTime);
+        // Every 20 ticks do a "wide" search: pure template from zeroed offsets.
+        // Other ticks: 6 candidates with varying perturbation, keep best.
+        const N_CANDIDATES = 6;
+        const wideSearch = tickCount % 20 === 0;
+        const base = wideSearch ? new Float64Array(n) : bestRef.current;
+        let bestCandidate: Float64Array | null = null;
+        let bestCandTime = bestTimeRef.current;
+        for (let k = 0; k < N_CANDIDATES; k++) {
+          const perturb = wideSearch ? 0 : 0.02 + k * 0.025; // 0.02..0.145
+          const raw = runGeometricPass(base, vehicle, hw, xs, ys, tg, signedK, perturb);
+          const cand = runLengthPass(raw, signedK);
+          const t = fitness(cand, vehicle, hw, xs, ys, tg);
+          if (Number.isFinite(t) && t < bestCandTime) { bestCandTime = t; bestCandidate = cand; }
+        }
+        if (bestCandidate !== null) {
+          bestTimeRef.current = bestCandTime;
+          bestRef.current = bestCandidate;
+          setBestTime(bestCandTime);
           onBestOffsets(bestRef.current, bestTimeRef.current);
         }
-        gradStep.current = Math.max(0.003, gradStep.current * 0.992);
         setGen(g => g + 1);
       }
 
@@ -141,8 +156,21 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
     stopSmoothen();
     genState.current = null;
     annState.current = null;
-    bestRef.current = seed;
+    // re-seed from the current displayed line (picks up manual edits)
+    bestRef.current = new Float64Array(seedRef.current);
+    bestTimeRef.current = Infinity;
     setGen(0); setSmoothTrials(0); setBestTime(null);
+  }
+
+  function lineReset() {
+    stop();
+    stopSmoothen();
+    genState.current = null;
+    annState.current = null;
+    bestRef.current = new Float64Array(seed.length); // zero = centre line
+    bestTimeRef.current = Infinity;
+    setGen(0); setSmoothTrials(0); setBestTime(null);
+    onLineReset();
   }
 
   function switchModel(m: Model) {
@@ -182,18 +210,18 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
       <div style={hdr}>Optimizer</div>
 
       <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
-        {(["gradient", "genetic", "annealing"] as Model[]).map(m => (
+        {(["geometric", "genetic", "annealing"] as Model[]).map(m => (
           <button key={m} onClick={() => switchModel(m)} style={{
             flex: 1, padding: "5px 0", border: `1px solid ${model === m ? "#3b82f6" : "#333"}`,
             background: "none", color: model === m ? "#60a5fa" : "#555",
             borderRadius: 4, cursor: "pointer", fontSize: 11, letterSpacing: 0.5,
           }}>
-            {m === "gradient" ? "Gradient" : m === "genetic" ? "Genetic" : "Annealing"}
+            {m === "geometric" ? "Geometric" : m === "genetic" ? "Genetic" : "Annealing"}
           </button>
         ))}
       </div>
 
-      {model !== "gradient" && (
+      {model !== "geometric" && (
         <Row label="Mutation σ">
           <input type="number" value={sigma} min={0.01} max={0.5} step={0.01}
             onChange={e => setSigma(parseFloat(e.target.value) || 0.08)} disabled={running} style={numIn} />
@@ -227,6 +255,10 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
           padding: "7px 12px", border: "1px solid #333", borderRadius: 4,
           cursor: "pointer", background: "none", color: "#555", fontSize: 12,
         }}>RESET</button>
+        <button onClick={lineReset} style={{
+          padding: "7px 12px", border: "1px solid #7f1d1d", borderRadius: 4,
+          cursor: "pointer", background: "none", color: "#f87171", fontSize: 12,
+        }}>LINE RESET</button>
       </div>
 
       <div style={{ marginTop: 10, fontSize: 11, display: "flex", justifyContent: "space-between" }}>

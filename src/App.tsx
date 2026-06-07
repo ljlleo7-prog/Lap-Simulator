@@ -33,6 +33,8 @@ const DEFAULT_VEHICLE: VehicleParams = {
   mass: 700, dragArea: 0.9, liftArea: 3.0,
   muLat: 1.8, muLon: 1.8, tyreDragK: 0.05,
   curveMode: "torque", finalDrive: 8.5, wheelRadius: 0.33,
+  drivetrainLayout: "RWD", brakeBias: 0.6, diffLockRear: 0.0, diffLockFront: 0.0,
+  weightDistFront: 0.45, wheelbase: 2.5, trackWidth: 1.8, cgHeight: 0.35,
   powerCurve: [
     { x: 2000, y: 300 }, { x: 4000, y: 380 }, { x: 6000, y: 420 },
     { x: 8000, y: 400 }, { x: 10000, y: 340 }, { x: 12000, y: 250 },
@@ -111,6 +113,7 @@ export default function App() {
   const [editLineMode,   setEditLineMode]   = useState(false);
   const [handleStride,   setHandleStride]   = useState(5);
   const [gaussianWidth,  setGaussianWidth]  = useState(0.08);
+  const [trackLocked,    setTrackLocked]    = useState(false);
 
   const segments      = useMemo(() => buildBezierSegments(committedSections, true), [committedSections]);
   const centreSamples = useMemo(() => sampleCentreLine(segments), [segments]);
@@ -224,6 +227,7 @@ export default function App() {
             editLineMode={editLineMode}
             handleStride={handleStride}
             gaussianWidth={gaussianWidth}
+            trackLocked={trackLocked}
           />
         </div>
         {result && (
@@ -239,6 +243,14 @@ export default function App() {
 
         {/* canvas toolbar */}
         <div style={{ padding: "8px 14px", borderBottom: "1px solid #1e1e1e", display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+          <button
+            onClick={() => setTrackLocked(v => !v)}
+            style={{
+              padding: "5px 12px", border: `2px solid ${trackLocked ? "#ef4444" : "#374151"}`,
+              borderRadius: 4, cursor: "pointer", fontSize: 12, fontWeight: 700, letterSpacing: 0.5,
+              background: trackLocked ? "#7f1d1d" : "#111", color: trackLocked ? "#fca5a5" : "#6b7280",
+            }}
+          >{trackLocked ? "TRACK LOCKED" : "LOCK TRACK"}</button>
           <button onClick={() => fileInputRef.current?.click()} style={tbBtn(false)}>Image</button>
           <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleImageFile} />
           {bgImageUrl && <>
@@ -273,6 +285,7 @@ export default function App() {
           centreSamples={centreSamples} hw={hw}
           seed={optOffsets ?? new Float64Array(centreSamples.length)}
           vehicle={vehicle} onBestOffsets={handleBestOffsets}
+          onLineReset={() => { setOptOffsets(null); setUseOptLine(false); setResult(null); }}
         />
         <TrackIoPanel
           sections={committedSections} racingLineOffsets={optOffsets}

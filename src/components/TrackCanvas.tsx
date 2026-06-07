@@ -29,7 +29,8 @@ interface Props {
   gridSize: 50 | 100;
   editLineMode: boolean;
   handleStride: number;
-  gaussianWidth: number; // fraction of track length [0.01, 0.3]
+  gaussianWidth: number;
+  trackLocked: boolean;
 }
 
 function toSvgPath(pts: { x: number; y: number }[], close = false): string {
@@ -68,7 +69,7 @@ export function TrackCanvas({
   hw, optOffsets, onOffsetChange,
   bgImageUrl, bgOpacity, imageRect, onImageRect,
   calibMode, onCalibModeOff, trackLength, onDistanceCalib,
-  showGrid, gridSize, editLineMode, handleStride, gaussianWidth,
+  showGrid, gridSize, editLineMode, handleStride, gaussianWidth, trackLocked,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -252,6 +253,7 @@ export function TrackCanvas({
   }, [result, activeLine, HOVER_THRESHOLD_SQ, hover]);
 
   const onCanvasClick = useCallback((e: React.MouseEvent) => {
+    if (trackLocked) return;
     if (calibMode === "point") {
       const pt = svgCoords(e.clientX, e.clientY);
       setCalibPoints(prev => prev.length >= 2 ? [{ x: pt.x, y: pt.y }] : [...prev, { x: pt.x, y: pt.y }]);
@@ -267,7 +269,7 @@ export function TrackCanvas({
     onDrag(next);
     onCommit(next);
     onSelect(id);
-  }, [calibMode, sections, onDrag, onCommit, onSelect]);
+  }, [trackLocked, calibMode, sections, onDrag, onCommit, onSelect]);
 
   const speeds = result ? Array.from(result.speeds) : [];
   const lonAccels = result ? Array.from(result.lonAccels) : [];
@@ -397,8 +399,8 @@ export function TrackCanvas({
               cx={sec.x} cy={sec.y} r={u * 0.012}
               fill={isEdit ? "#f59e0b" : sec.id === selectedId ? "#60a5fa" : "#3b82f6"}
               stroke="#0f0f0f" strokeWidth={u * 0.003}
-              style={{ cursor: editLineMode ? "default" : isEdit ? "crosshair" : "grab" }}
-              onPointerDown={editLineMode ? undefined : e => onPointerDown(e, sec.id)}
+              style={{ cursor: trackLocked || editLineMode ? "default" : isEdit ? "crosshair" : "grab" }}
+              onPointerDown={trackLocked || editLineMode ? undefined : e => onPointerDown(e, sec.id)}
             />
           );
         })}

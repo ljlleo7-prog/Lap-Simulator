@@ -29,9 +29,20 @@ function upload(onLoad: (data: unknown) => void) {
 // ── migration helpers ─────────────────────────────────────────────────────────
 
 function migrateVehicle(raw: Record<string, unknown>): VehicleParams {
+  const defaults: Partial<VehicleParams> = {
+    drivetrainLayout: "RWD",
+    brakeBias: 0.6,
+    diffLockRear: 0.0,
+    diffLockFront: 0.0,
+    weightDistFront: 0.45,
+    wheelbase: 2.5,
+    trackWidth: 1.8,
+    cgHeight: 0.35,
+  };
   if (!raw.powerCurve && typeof raw.peakPower === "number") {
     const kw = (raw.peakPower as number) / 1000;
     return {
+      ...defaults,
       mass: (raw.mass as number) ?? 700,
       dragArea: (raw.dragArea as number) ?? 0.9,
       liftArea: (raw.liftArea as number) ?? 3.0,
@@ -40,9 +51,9 @@ function migrateVehicle(raw: Record<string, unknown>): VehicleParams {
       tyreDragK: (raw.tyreDragK as number) ?? 0.05,
       curveMode: "power",
       powerCurve: [{ x: 0, y: kw }, { x: 100, y: kw }, { x: 300, y: kw }],
-    };
+    } as VehicleParams;
   }
-  return raw as unknown as VehicleParams;
+  return { ...defaults, ...raw } as VehicleParams;
 }
 
 function migrateTrack(raw: unknown): CrossSection[] {
