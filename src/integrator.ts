@@ -31,21 +31,23 @@ function solveSpeedProfile(
 ): void {
   const n = points.length;
 
-  // Forward pass — lon limit reduced by however much of grip is used laterally
+  // Forward pass — lon limit reduced by friction circle + slip-angle tyre drag
   v[0] = Math.min(v[0], entrySpeed);
   for (let i = 0; i < n - 1; i++) {
-    const aLat = latAccelAt(v[i], points[i].radius);
-    const aMax = maxLonAccel(params, v[i], aLat);
+    const r    = points[i].radius;
+    const aLat = latAccelAt(v[i], r);
+    const aMax = maxLonAccel(params, v[i], aLat, r);
     const d = dx(points, i);
     const vNext = Math.sqrt(Math.max(0, v[i] * v[i] + 2 * aMax * d));
     v[i + 1] = Math.min(v[i + 1], vNext);
   }
 
-  // Backward pass — same friction circle constraint on braking
+  // Backward pass — same
   v[n - 1] = Math.min(v[n - 1], exitSpeed);
   for (let i = n - 2; i >= 0; i--) {
-    const aLat = latAccelAt(v[i + 1], points[i + 1].radius);
-    const bMax = maxDecel(params, v[i + 1], aLat);
+    const r    = points[i + 1].radius;
+    const aLat = latAccelAt(v[i + 1], r);
+    const bMax = maxDecel(params, v[i + 1], aLat, r);
     const d = dx(points, i);
     const vPrev = Math.sqrt(Math.max(0, v[i + 1] * v[i + 1] + 2 * bMax * d));
     v[i] = Math.min(v[i], vPrev);
@@ -138,16 +140,18 @@ export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): Sim
   vWrap[0] = Math.min(vWrap[0], vHot[startIdx]);
   // Forward pass through the window
   for (let i = 0; i < wLen - 1; i++) {
-    const aLat = latAccelAt(vWrap[i], wPts[i].radius);
-    const aMax = maxLonAccel(params, vWrap[i], aLat);
+    const r    = wPts[i].radius;
+    const aLat = latAccelAt(vWrap[i], r);
+    const aMax = maxLonAccel(params, vWrap[i], aLat, r);
     const d = wPts[i + 1].distance - wPts[i].distance;
     const vNext = Math.sqrt(Math.max(0, vWrap[i] * vWrap[i] + 2 * aMax * d));
     vWrap[i + 1] = Math.min(vWrap[i + 1], vNext);
   }
   // Backward pass through the window — exit is unconstrained
   for (let i = wLen - 2; i >= 0; i--) {
-    const aLat = latAccelAt(vWrap[i + 1], wPts[i + 1].radius);
-    const bMax = maxDecel(params, vWrap[i + 1], aLat);
+    const r    = wPts[i + 1].radius;
+    const aLat = latAccelAt(vWrap[i + 1], r);
+    const bMax = maxDecel(params, vWrap[i + 1], aLat, r);
     const d = wPts[i + 1].distance - wPts[i].distance;
     const vPrev = Math.sqrt(Math.max(0, vWrap[i + 1] * vWrap[i + 1] + 2 * bMax * d));
     vWrap[i] = Math.min(vWrap[i], vPrev);
