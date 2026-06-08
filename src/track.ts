@@ -12,7 +12,7 @@ export function buildTrackProfile(segments: TrackSegment[]): TrackPoint[] {
   const points: TrackPoint[] = [];
   let dist = 0;
   for (const seg of segments) {
-    const step = Math.min(seg.length, 5); // ~5 m resolution
+    const step = Math.min(seg.length, 3); // ~3 m resolution
     const n = Math.max(1, Math.round(seg.length / step));
     const dx = seg.length / n;
     for (let i = 0; i < n; i++) {

@@ -30,6 +30,26 @@ export interface VehicleParams {
   wheelbase: number;      // metres
   trackWidth: number;     // metres (average)
   cgHeight: number;       // centre of gravity height, metres
+  yawInertia: number;     // kg·m²
+  steeringLockDeg: number; // max front wheel steer angle
+  corneringStiffnessFront: number; // N/rad
+  corneringStiffnessRear: number;  // N/rad
+  yawDragK: number;       // yaw inertia drag scale
+}
+
+const DEFAULT_PARAMS: VehicleParams = {
+  mass: 700, dragArea: 0.9, liftArea: 3.0,
+  muLat: 1.8, muLon: 1.8, tyreDragK: 0.05,
+  curveMode: "torque", finalDrive: 8.5, wheelRadius: 0.33,
+  drivetrainLayout: "RWD", brakeBias: 0.6, diffLockRear: 0, diffLockFront: 0,
+  weightDistFront: 0.45, wheelbase: 2.5, trackWidth: 1.8, cgHeight: 0.35,
+  yawInertia: 900, steeringLockDeg: 32,
+  corneringStiffnessFront: 70000, corneringStiffnessRear: 80000, yawDragK: 0.15,
+  powerCurve: [{ x: 2000, y: 300 }, { x: 6000, y: 420 }, { x: 12000, y: 250 }],
+};
+
+function params(p: VehicleParams | Partial<VehicleParams> | undefined): VehicleParams {
+  return { ...DEFAULT_PARAMS, ...(p ?? {}) } as VehicleParams;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -48,7 +68,8 @@ function totalNormalLoad(p: VehicleParams, v: number): number {
 
 // ── Axle load split ───────────────────────────────────────────────────────────
 // lonAccel > 0 = accelerating (weight shifts rearward), < 0 = braking (shifts forward).
-export function axleLoads(p: VehicleParams, v: number, lonAccel = 0): [number, number] {
+export function axleLoads(raw: VehicleParams, v: number, lonAccel = 0): [number, number] {
+  const p = params(raw);
   const W = totalNormalLoad(p, v);
   const transfer = p.mass * lonAccel * p.cgHeight / p.wheelbase;
   const frontLoad = Math.max(0, p.weightDistFront * W - transfer);
@@ -56,45 +77,43 @@ export function axleLoads(p: VehicleParams, v: number, lonAccel = 0): [number, n
   return [frontLoad, rearLoad];
 }
 
+function drivenAxleLoadFromLoads(p: VehicleParams, frontLoad: number, rearLoad: number): number {
+  if (p.drivetrainLayout === "RWD") return rearLoad;
+  if (p.drivetrainLayout === "FWD") return frontLoad;
+  return frontLoad + rearLoad;
+}
+
 function drivenAxleLoad(p: VehicleParams, v: number, lonAccel: number): number {
   const [fL, rL] = axleLoads(p, v, lonAccel);
-  if (p.drivetrainLayout === "RWD") return rL;
-  if (p.drivetrainLayout === "FWD") return fL;
-  return fL + rL;
+  return drivenAxleLoadFromLoads(p, fL, rL);
 }
 
 // ── Braking grip ──────────────────────────────────────────────────────────────
 // Rear-only braking (kart): lateral load transfer can unload the inside rear,
 // reducing effective grip when cornering and braking simultaneously.
-function brakingGripForce(p: VehicleParams, v: number, latAccel: number): number {
-  const [fL, rL] = axleLoads(p, v, 0);
+function brakingGripForceFromLoads(p: VehicleParams, frontLoad: number, rearLoad: number, latAccel: number): number {
   const latTransfer = p.mass * Math.abs(latAccel) * p.cgHeight / Math.max(p.trackWidth, 0.1);
-  // solid rear axle: inside rear unloads under lateral g, reducing rear brake grip
   const rearUnloadFactor = p.diffLockRear > 0.5
-    ? Math.max(0.5, 1 - (latTransfer / Math.max(rL, 1)) * p.diffLockRear * 0.4)
+    ? Math.max(0.5, 1 - (latTransfer / Math.max(rearLoad, 1)) * p.diffLockRear * 0.4)
     : 1;
-  return p.brakeBias * fL * p.muLon + (1 - p.brakeBias) * rL * rearUnloadFactor * p.muLon;
+  return p.brakeBias * frontLoad * p.muLon + (1 - p.brakeBias) * rearLoad * rearUnloadFactor * p.muLon;
 }
 
-// ── Tyre drag ─────────────────────────────────────────────────────────────────
-// Derived from slip angle geometry rather than lateral G-force, so tight
-// low-speed corners (large α, small aLat) produce the correct large drag.
-//
-// Bicycle model: α = atan(wheelbase / radius)
-// Slip drag force = muLat · N · tyreDragK · sin(α)
-// — the lateral force vector projects onto the longitudinal axis by sin(α).
-// At high-speed large-radius corners α is small → small drag.
-// At low-speed hairpins α is large (up to ~12° peak) → large drag.
-// Cap α at peak_slip_angle (≈12° = 0.21 rad) beyond which the tyre is sliding
-// and drag is dominated by kinetic friction (already captured by muLon).
+function brakingGripForce(p: VehicleParams, v: number, latAccel: number, lonAccel: number): number {
+  const [fL, rL] = axleLoads(p, v, lonAccel);
+  return brakingGripForceFromLoads(p, fL, rL, latAccel);
+}
+
+// Bicycle-model projection drag: when the front tyres generate lateral force at
+// steer angle α, part of that force opposes longitudinal motion by tan(α).
 const PEAK_SLIP_RAD = 0.21; // ~12°
 
-function tyreDragForce(p: VehicleParams, v: number, r: number): number {
-  if (r === Infinity || r <= 0) return 0;
-  const L = p.wheelbase ?? 2.5;
-  const alpha = Math.min(Math.atan(L / r), PEAK_SLIP_RAD);
-  const N = totalNormalLoad(p, v);
-  return p.tyreDragK * p.muLat * N * Math.sin(alpha);
+function tyreDragForce(p: VehicleParams, latAccel: number, r: number): number {
+  if (r === Infinity || r === 0 || latAccel === 0) return 0;
+  const steer = Math.min(steerAngleForRadius(p, r), PEAK_SLIP_RAD);
+  const frontShare = Math.max(0.25, Math.min(0.75, p.weightDistFront));
+  const lateralForce = p.mass * Math.abs(latAccel) * frontShare;
+  return p.tyreDragK * lateralForce * Math.abs(Math.tan(steer));
 }
 
 // Solid-axle (spool/kart) scrub: inside rear tyre is forced to slip laterally.
@@ -105,6 +124,64 @@ function solidAxleScrub(p: VehicleParams, v: number, latAccel: number): number {
   const latTransfer = p.mass * Math.abs(latAccel) * p.cgHeight / Math.max(p.trackWidth, 0.1);
   const latFrac = Math.min(latTransfer / Math.max(rL, 1), 1);
   return p.diffLockRear * p.tyreDragK * rL * latFrac * latFrac;
+}
+
+function curvatureMagnitudeRadius(r: number): number {
+  return Math.abs(r);
+}
+
+export function steerAngleForRadius(raw: VehicleParams, r: number): number {
+  const p = params(raw);
+  if (r === Infinity || r === 0) return 0;
+  return Math.atan(p.wheelbase / curvatureMagnitudeRadius(r));
+}
+
+export function steeringExcessDragForce(raw: VehicleParams, v: number, r: number): number {
+  const p = params(raw);
+  if (r === Infinity || r === 0) return 0;
+  const maxSteer = (p.steeringLockDeg * Math.PI) / 180;
+  const excess = Math.max(0, steerAngleForRadius(p, r) / Math.max(maxSteer, 1e-6) - 1);
+  return excess * excess * p.muLat * totalNormalLoad(p, v) * 0.25;
+}
+
+export function corneringComplianceDragForce(raw: VehicleParams, v: number, latAccel: number, r: number): number {
+  const p = params(raw);
+  if (r === Infinity || r === 0 || latAccel === 0) return 0;
+  const alpha = steerAngleForRadius(p, r);
+  const latForce = p.mass * Math.abs(latAccel);
+  const latCapacity = p.muLat * totalNormalLoad(p, v);
+  const utilization = Math.min(1, latForce / Math.max(latCapacity, 1));
+  const [fL, rL] = axleLoads(p, v, 0);
+  const fForce = latForce * p.weightDistFront;
+  const rForce = latForce * (1 - p.weightDistFront);
+  const fSlip = fForce / Math.max(p.corneringStiffnessFront * alpha, 1);
+  const rSlip = rForce / Math.max(p.corneringStiffnessRear * alpha, 1);
+  const compliance = Math.max(0, (fSlip * fL + rSlip * rL) / Math.max(fL + rL, 1) - 1);
+  return compliance * utilization * utilization * p.tyreDragK * latForce * Math.abs(Math.tan(alpha));
+}
+
+export function steeringTransitionDragForce(raw: VehicleParams, v: number, r0: number, r1: number, ds: number): number {
+  const p = params(raw);
+  const k0 = r0 === Infinity ? 0 : 1 / r0;
+  const k1 = r1 === Infinity ? 0 : 1 / r1;
+  const steer0 = Math.atan(p.wheelbase * k0);
+  const steer1 = Math.atan(p.wheelbase * k1);
+  const dSteerDs = (steer1 - steer0) / Math.max(ds, 0.01);
+  const dBearingDs = (k1 - k0) / Math.max(ds, 0.01);
+  const reversal = k0 * k1 < 0 ? Math.min(Math.abs(k1 - k0) * p.wheelbase, 0.5) : 0;
+  const normalLoad = totalNormalLoad(p, v);
+  const rateLoss = (dSteerDs * dSteerDs * p.wheelbase * 2500 + dBearingDs * dBearingDs * p.wheelbase * 800) * normalLoad;
+  return p.tyreDragK * (1 + p.diffLockRear) * rateLoss * Math.max(v, 1) + reversal * p.muLat * normalLoad * p.tyreDragK * 8.0;
+}
+
+export function yawInertiaDragForce(raw: VehicleParams, v: number, r0: number, r1: number, ds: number): number {
+  const p = params(raw);
+  if (!Number.isFinite(r0) && !Number.isFinite(r1)) return 0;
+  const k0 = r0 === Infinity ? 0 : 1 / r0;
+  const k1 = r1 === Infinity ? 0 : 1 / r1;
+  const yawAccel = v * v * Math.abs(k1 - k0) / Math.max(ds, 0.01);
+  const yawTorque = p.yawInertia * yawAccel;
+  return p.yawDragK * yawTorque / Math.max(p.wheelbase, 0.1);
 }
 
 // Linear interpolation on a sorted PowerCurvePoint array.
@@ -138,34 +215,61 @@ function peakTractionForce(p: VehicleParams, v: number): number {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 // maxLateralAccel now uses speed-dependent normal load (includes aero downforce).
-export function maxLateralAccel(p: VehicleParams, v: number): number {
+export function maxLateralAccel(raw: VehicleParams, v: number): number {
+  const p = params(raw);
   return (p.muLat * totalNormalLoad(p, v)) / p.mass;
 }
 
 // Friction circle: fraction of longitudinal grip remaining given lateral accel used.
-export function lonAvailFraction(p: VehicleParams, v: number, latAccel: number): number {
+export function lonAvailFraction(raw: VehicleParams, v: number, latAccel: number): number {
+  const p = params(raw);
   const aLatMax = maxLateralAccel(p, v);
   if (aLatMax <= 0) return 1;
   const frac = Math.abs(latAccel) / aLatMax;
   return Math.sqrt(Math.max(0, 1 - frac * frac));
 }
 
-export function maxLonAccel(p: VehicleParams, v: number, latAccel = 0, r = Infinity): number {
-  const tractionForce = peakTractionForce(p, v);
-  const drivenLoad    = drivenAxleLoad(p, v, 1.0);
-  const gripForce     = p.muLon * drivenLoad * lonAvailFraction(p, v, latAccel);
-  const drag          = aeroDrag(p, v) + tyreDragForce(p, v, r) + solidAxleScrub(p, v, latAccel);
-  return (Math.min(tractionForce, gripForce) - drag) / p.mass;
+function parasiticTireLossForce(p: VehicleParams, v: number, latAccel: number, r: number): number {
+  return tyreDragForce(p, latAccel, r)
+    + steeringExcessDragForce(p, v, r)
+    + corneringComplianceDragForce(p, v, latAccel, r)
+    + solidAxleScrub(p, v, latAccel);
 }
 
-export function maxDecel(p: VehicleParams, v: number, latAccel = 0, r = Infinity): number {
-  const brakeForce = brakingGripForce(p, v, latAccel) * lonAvailFraction(p, v, latAccel);
-  const drag       = aeroDrag(p, v) + tyreDragForce(p, v, r) + solidAxleScrub(p, v, latAccel);
-  return (brakeForce + drag) / p.mass;
+export function maxLonAccel(raw: VehicleParams, v: number, latAccel = 0, r = Infinity): number {
+  const p = params(raw);
+  const tractionForce = peakTractionForce(p, v);
+  const externalDrag = aeroDrag(p, v);
+  const tyreLoss = parasiticTireLossForce(p, v, latAccel, r);
+  let accel = Math.max(0, (Math.min(tractionForce, p.muLon * drivenAxleLoad(p, v, 0)) - tyreLoss - externalDrag) / p.mass);
+
+  for (let i = 0; i < 3; i++) {
+    const [fL, rL] = axleLoads(p, v, accel);
+    const drivenLoad = drivenAxleLoadFromLoads(p, fL, rL);
+    const gripForce = p.muLon * drivenLoad * lonAvailFraction(p, v, latAccel);
+    const usableDrive = Math.max(0, Math.min(tractionForce, gripForce) - tyreLoss);
+    accel = (usableDrive - externalDrag) / p.mass;
+  }
+
+  return accel;
+}
+
+export function maxDecel(raw: VehicleParams, v: number, latAccel = 0, r = Infinity): number {
+  const p = params(raw);
+  const externalDrag = aeroDrag(p, v);
+  let decel = (brakingGripForce(p, v, latAccel, 0) * lonAvailFraction(p, v, latAccel) + externalDrag) / p.mass;
+
+  for (let i = 0; i < 3; i++) {
+    const brakeForce = brakingGripForce(p, v, latAccel, -decel) * lonAvailFraction(p, v, latAccel);
+    decel = (brakeForce + externalDrag) / p.mass;
+  }
+
+  return decel;
 }
 
 // Derived peak power in kW (for display only).
-export function derivedPeakPowerKw(p: VehicleParams): number {
+export function derivedPeakPowerKw(raw: VehicleParams): number {
+  const p = params(raw);
   if (p.curveMode === "torque") {
     const fd = p.finalDrive ?? 8.5;
     const wr = p.wheelRadius ?? 0.33;

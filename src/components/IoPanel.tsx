@@ -38,6 +38,11 @@ function migrateVehicle(raw: Record<string, unknown>): VehicleParams {
     wheelbase: 2.5,
     trackWidth: 1.8,
     cgHeight: 0.35,
+    yawInertia: 900,
+    steeringLockDeg: 32,
+    corneringStiffnessFront: 70000,
+    corneringStiffnessRear: 80000,
+    yawDragK: 0.15,
   };
   if (!raw.powerCurve && typeof raw.peakPower === "number") {
     const kw = (raw.peakPower as number) / 1000;

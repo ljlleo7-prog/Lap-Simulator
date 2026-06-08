@@ -1,4 +1,11 @@
-import { VehicleParams, maxLateralAccel, maxLonAccel, maxDecel, lonAvailFraction } from "./vehicle.js";
+import {
+  VehicleParams,
+  maxLateralAccel,
+  maxLonAccel,
+  maxDecel,
+  steeringTransitionDragForce,
+  yawInertiaDragForce,
+} from "./vehicle.js";
 import { TrackPoint } from "./track.js";
 
 export interface SimResult {
@@ -14,12 +21,31 @@ function dx(points: TrackPoint[], i: number): number {
   return points[i + 1].distance - points[i].distance;
 }
 
+function wrappedDx(points: TrackPoint[], i: number): number {
+  const n = points.length;
+  const idx = ((i % n) + n) % n;
+  if (idx < n - 1) return points[idx + 1].distance - points[idx].distance;
+  const total = points[n - 1].distance;
+  return Math.max(0.01, total - points[idx].distance + points[0].distance);
+}
+
 // Core solver: fills v[] with the min-time speed profile.
 // v[] must already be initialised with lateral grip limits.
 // entrySpeed caps v[0]; exitSpeed (if finite) caps v[n-1] so the car
 // can continue safely onto the next lap / next section.
 function latAccelAt(v: number, r: number): number {
-  return r === Infinity ? 0 : (v * v) / r;
+  return r === Infinity ? 0 : (v * v) / Math.abs(r);
+}
+
+function signedCurvature(r: number): number {
+  return r === Infinity ? 0 : 1 / r;
+}
+
+function transientDragAccel(params: VehicleParams, v: number, r0: number, r1: number, d: number): number {
+  const raw = (yawInertiaDragForce(params, v, r0, r1, d) + steeringTransitionDragForce(params, v, r0, r1, d)) / params.mass;
+  const gripBound = maxLateralAccel(params, v) * 0.35;
+  const energyBound = v * v / Math.max(4 * d, 0.01);
+  return Math.min(raw, gripBound, energyBound);
 }
 
 function solveSpeedProfile(
@@ -36,8 +62,9 @@ function solveSpeedProfile(
   for (let i = 0; i < n - 1; i++) {
     const r    = points[i].radius;
     const aLat = latAccelAt(v[i], r);
-    const aMax = maxLonAccel(params, v[i], aLat, r);
     const d = dx(points, i);
+    const transientDrag = transientDragAccel(params, v[i], r, points[i + 1].radius, d);
+    const aMax = maxLonAccel(params, v[i], aLat, r) - transientDrag;
     const vNext = Math.sqrt(Math.max(0, v[i] * v[i] + 2 * aMax * d));
     v[i + 1] = Math.min(v[i + 1], vNext);
   }
@@ -54,13 +81,30 @@ function solveSpeedProfile(
   }
 }
 
+function lateralGripUtilization(params: VehicleParams): number {
+  const kartPenalty = params.diffLockRear > 0.8 && params.wheelbase < 1.3 ? 0.82 : 0.9;
+  return Math.max(0.75, kartPenalty - params.tyreDragK * 0.2);
+}
+
+function cornerSpeedLimit(params: VehicleParams, radius: number): number {
+  if (radius === Infinity) return Infinity;
+  const r = Math.abs(radius);
+  const utilization = lateralGripUtilization(params);
+  let lo = 0;
+  let hi = 120;
+  for (let i = 0; i < 8 && latAccelAt(hi, r) <= maxLateralAccel(params, hi) * utilization; i++) hi *= 1.5;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (latAccelAt(mid, r) <= maxLateralAccel(params, mid) * utilization) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
 function lateralLimits(params: VehicleParams, points: TrackPoint[]): Float64Array {
   const n = points.length;
   const v = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const r = points[i].radius;
-    v[i] = r === Infinity ? Infinity : Math.sqrt(maxLateralAccel(params, 0) * r);
-  }
+  for (let i = 0; i < n; i++) v[i] = cornerSpeedLimit(params, points[i].radius);
   return v;
 }
 
@@ -119,19 +163,15 @@ export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): Sim
   // Now enforce exit continuity: simulate braking from the post-finish corner.
   // points[0] is the first corner the car must handle on the next lap.
   // Cap the exit speed to whatever the car could brake from to reach v[0] safely.
-  const LOOK = Math.min(20, Math.floor(n * 0.1)); // look 10% of lap or 20 pts ahead
+  const LOOK = Math.max(1, Math.min(20, Math.floor(n * 0.1))); // look 10% of lap or 20 pts ahead
   // Build a small wrap-around window: [n-LOOK .. n-1, 0 .. LOOK]
   const wLen = LOOK * 2 + 1;
   const wPts: TrackPoint[] = [];
+  let wDist = 0;
   for (let k = -LOOK; k <= LOOK; k++) {
     const idx = ((k % n) + n) % n;
-    const prev = k > -LOOK ? wPts[wPts.length - 1] : null;
-    const base = prev ? prev.distance : 0;
-    const prevIdx = (((k - 1) % n) + n) % n;
-    const segLen = k > -LOOK
-      ? Math.abs(points[idx].distance - points[prevIdx].distance) || dx(points, prevIdx)
-      : 0;
-    wPts.push({ distance: base + segLen, radius: points[idx].radius });
+    if (k > -LOOK) wDist += wrappedDx(points, idx - 1);
+    wPts.push({ distance: wDist, radius: points[idx].radius });
   }
 
   const vWrap = lateralLimits(params, wPts);
@@ -142,8 +182,9 @@ export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): Sim
   for (let i = 0; i < wLen - 1; i++) {
     const r    = wPts[i].radius;
     const aLat = latAccelAt(vWrap[i], r);
-    const aMax = maxLonAccel(params, vWrap[i], aLat, r);
     const d = wPts[i + 1].distance - wPts[i].distance;
+    const transientDrag = transientDragAccel(params, vWrap[i], r, wPts[i + 1].radius, d);
+    const aMax = maxLonAccel(params, vWrap[i], aLat, r) - transientDrag;
     const vNext = Math.sqrt(Math.max(0, vWrap[i] * vWrap[i] + 2 * aMax * d));
     vWrap[i + 1] = Math.min(vWrap[i + 1], vNext);
   }
@@ -156,10 +197,8 @@ export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): Sim
     const vPrev = Math.sqrt(Math.max(0, vWrap[i + 1] * vWrap[i + 1] + 2 * bMax * d));
     vWrap[i] = Math.min(vWrap[i], vPrev);
   }
-  // The speed at window index LOOK is the max safe speed at points[0] on next lap.
-  // The speed at window index LOOK-1 is the max safe speed one step before finish.
-  // Use the speed at index 0 of the wrap (= n-LOOK in the hot lap) as the exit cap.
-  const exitSpeed = vWrap[LOOK]; // speed at the seam (points[0])
+  // The speed just before the seam is the max safe hot-lap exit speed.
+  const exitSpeed = vWrap[LOOK - 1];
 
   // ── Final hot-lap solve with correct entry and exit constraints ───────────
   const vFinal = lateralLimits(params, points);

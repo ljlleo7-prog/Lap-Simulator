@@ -1,14 +1,10 @@
 import { useRef, useState } from "react";
-import {
-  initPopulation, runGeneration,
-  initAnnealing, runAnnealingStep,
-  runGeometricPass, runLengthPass, runSmoothenStep, fitness,
-} from "../optimizer.js";
-import type { Offsets, AnnealState } from "../optimizer.js";
+import type { Offsets } from "../optimizer.js";
 import type { CentreSample } from "../geometry.js";
 import type { VehicleParams } from "../vehicle.js";
 
 type Model = "geometric" | "genetic" | "annealing";
+type Mode = "optimize" | "smoothen";
 
 interface Props {
   centreSamples: CentreSample[];
@@ -17,6 +13,15 @@ interface Props {
   vehicle: VehicleParams;
   onBestOffsets: (offsets: Offsets, lapTime: number) => void;
   onLineReset: () => void;
+}
+
+interface ProgressMessage {
+  type: "progress";
+  trials: number;
+  bestTime: number;
+  batchDone: number;
+  batchSize: number;
+  bestOffsets?: Float64Array;
 }
 
 function fmt(t: number): string {
@@ -37,138 +42,77 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
   const [smoothTrials, setSmoothTrials] = useState(0);
   const [bestTime, setBestTime] = useState<number | null>(null);
   const [smoothSigma, setSmoothSigma] = useState(0.04);
-  const bestTimeRef = useRef<number>(Infinity);
+  const [smoothAcceptMargin, setSmoothAcceptMargin] = useState(0.05);
+  const [batchSize, setBatchSize] = useState(10);
+  const [batchProgress, setBatchProgress] = useState(0);
 
-  const rafRef       = useRef<number | null>(null);
-  const smoothRafRef = useRef<number | null>(null);
-  const genState  = useRef<{ pop: ReturnType<typeof initPopulation>; gen: number; best: number } | null>(null);
-  const annState  = useRef<AnnealState | null>(null);
-  const bestRef   = useRef<Offsets>(seed);
-  const seedRef   = useRef<Offsets>(seed);
-  const smoothSigmaRef = useRef(smoothSigma);
-  smoothSigmaRef.current = smoothSigma;
-  // always track latest seed so reset/start can pick it up
+  const workerRef = useRef<Worker | null>(null);
+  const seedRef = useRef<Offsets>(seed);
   seedRef.current = seed;
 
-  function arrays() {
-    const n = centreSamples.length;
-    const xs = new Float64Array(n), ys = new Float64Array(n), tg = new Float64Array(n);
-    for (let i = 0; i < n; i++) { xs[i] = centreSamples[i].x; ys[i] = centreSamples[i].y; tg[i] = centreSamples[i].tangentAngle; }
-    return { xs, ys, tg };
+  function stopWorker() {
+    workerRef.current?.terminate();
+    workerRef.current = null;
+    setBatchProgress(0);
+  }
+
+  function startWorker(mode: Mode) {
+    stopWorker();
+
+    const worker = new Worker(new URL("../optimizerWorker.ts", import.meta.url), { type: "module" });
+    workerRef.current = worker;
+    setBatchProgress(0);
+
+    worker.onmessage = (event: MessageEvent<ProgressMessage>) => {
+      const msg = event.data;
+      if (msg.type !== "progress") return;
+
+      if (mode === "smoothen") setSmoothTrials(msg.trials);
+      else setGen(msg.trials);
+      setBatchProgress(msg.batchSize > 0 ? msg.batchDone / msg.batchSize : 0);
+
+      if (Number.isFinite(msg.bestTime)) setBestTime(msg.bestTime);
+      if (msg.bestOffsets) onBestOffsets(msg.bestOffsets, msg.bestTime);
+    };
+
+    worker.postMessage({
+      type: "start",
+      mode,
+      model,
+      centreSamples,
+      hw,
+      seed: new Float64Array(seedRef.current),
+      vehicle,
+      batchSize,
+      popSize,
+      sigma,
+      tempStart,
+      cooling,
+      smoothSigma,
+      smoothAcceptMargin,
+    });
   }
 
   function start() {
-    if (running) return;
-    // always re-seed from the latest external line (picks up manual edits)
-    bestRef.current = new Float64Array(seedRef.current);
-    bestTimeRef.current = Infinity;
-
-    const { xs, ys, tg } = arrays();
-    const cur = bestRef.current;
-
-    const seedTime = fitness(cur, vehicle, hw, xs, ys, tg);
-    if (Number.isFinite(seedTime)) {
-      bestTimeRef.current = seedTime;
-      setBestTime(seedTime);
-    }
-
-    if (model === "genetic") {
-      genState.current = { pop: initPopulation(cur, popSize, sigma), gen: 0, best: bestTimeRef.current };
-    } else if (model === "annealing") {
-      annState.current = initAnnealing(cur, vehicle, hw, xs, ys, tg, tempStart);
-    }
-
+    if (running || smoothRunning) return;
     setRunning(true);
-
-    let tickCount = 0;
-    function tick() {
-      const { xs, ys, tg } = arrays();
-      tickCount++;
-
-      if (model === "genetic" && genState.current) {
-        const { population, best, bestLapTime } = runGeneration(genState.current.pop, vehicle, hw, xs, ys, tg, sigma);
-        genState.current.pop = population;
-        genState.current.gen += 1;
-        if (bestLapTime < genState.current.best) {
-          genState.current.best = bestLapTime;
-          bestRef.current = best;
-          bestTimeRef.current = bestLapTime;
-          onBestOffsets(best, bestLapTime);
-          setBestTime(bestLapTime);
-        }
-        setGen(g => g + 1);
-      } else if (model === "annealing" && annState.current) {
-        annState.current = runAnnealingStep(annState.current, vehicle, hw, xs, ys, tg, sigma, cooling);
-        const { best, bestFitness } = annState.current;
-        if (bestFitness < bestTimeRef.current) {
-          bestTimeRef.current = bestFitness;
-          bestRef.current = best;
-          onBestOffsets(best, bestFitness);
-          setBestTime(bestFitness);
-        }
-        setGen(g => g + 1);
-      } else if (model === "geometric") {
-        const n = centreSamples.length;
-        const signedK = new Float64Array(n);
-        for (let i = 0; i < n; i++) {
-          const prev = centreSamples[(i - 1 + n) % n], next = centreSamples[(i + 1) % n];
-          let da = next.tangentAngle - prev.tangentAngle;
-          while (da >  Math.PI) da -= 2 * Math.PI;
-          while (da < -Math.PI) da += 2 * Math.PI;
-          signedK[i] = da / (next.distance - prev.distance || 0.01);
-        }
-        // Every 20 ticks do a "wide" search: pure template from zeroed offsets.
-        // Other ticks: 6 candidates with varying perturbation, keep best.
-        const N_CANDIDATES = 6;
-        const wideSearch = tickCount % 20 === 0;
-        const base = wideSearch ? new Float64Array(n) : bestRef.current;
-        let bestCandidate: Float64Array | null = null;
-        let bestCandTime = bestTimeRef.current;
-        for (let k = 0; k < N_CANDIDATES; k++) {
-          const perturb = wideSearch ? 0 : 0.02 + k * 0.025; // 0.02..0.145
-          const raw = runGeometricPass(base, vehicle, hw, xs, ys, tg, signedK, perturb);
-          const cand = runLengthPass(raw, signedK);
-          const t = fitness(cand, vehicle, hw, xs, ys, tg);
-          if (Number.isFinite(t) && t < bestCandTime) { bestCandTime = t; bestCandidate = cand; }
-        }
-        if (bestCandidate !== null) {
-          bestTimeRef.current = bestCandTime;
-          bestRef.current = bestCandidate;
-          setBestTime(bestCandTime);
-          onBestOffsets(bestRef.current, bestTimeRef.current);
-        }
-        setGen(g => g + 1);
-      }
-
-      rafRef.current = requestAnimationFrame(tick);
-    }
-
-    rafRef.current = requestAnimationFrame(tick);
+    startWorker("optimize");
   }
 
   function stop() {
-    if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    stopWorker();
     setRunning(false);
   }
 
   function reset() {
     stop();
     stopSmoothen();
-    genState.current = null;
-    annState.current = null;
-    // re-seed from the current displayed line (picks up manual edits)
-    bestRef.current = new Float64Array(seedRef.current);
-    bestTimeRef.current = Infinity;
     setGen(0); setSmoothTrials(0); setBestTime(null);
   }
 
   function lineReset() {
     stop();
     stopSmoothen();
-    genState.current = null;
-    annState.current = null;
-    bestRef.current = new Float64Array(seed.length); // zero = centre line
-    bestTimeRef.current = Infinity;
     setGen(0); setSmoothTrials(0); setBestTime(null);
     onLineReset();
   }
@@ -180,28 +124,13 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
   }
 
   function startSmoothen() {
-    if (smoothRunning) return;
+    if (running || smoothRunning) return;
     setSmoothRunning(true);
-
-    function tick() {
-      const { xs, ys, tg } = arrays();
-      const improved = runSmoothenStep(bestRef.current, vehicle, hw, xs, ys, tg, smoothSigmaRef.current);
-      if (improved !== null) {
-        const newTime = fitness(improved, vehicle, hw, xs, ys, tg);
-        bestRef.current = improved;
-        bestTimeRef.current = newTime;
-        setBestTime(newTime);
-        onBestOffsets(improved, newTime);
-      }
-      setSmoothTrials(t => t + 1);
-      smoothRafRef.current = requestAnimationFrame(tick);
-    }
-
-    smoothRafRef.current = requestAnimationFrame(tick);
+    startWorker("smoothen");
   }
 
   function stopSmoothen() {
-    if (smoothRafRef.current !== null) { cancelAnimationFrame(smoothRafRef.current); smoothRafRef.current = null; }
+    stopWorker();
     setSmoothRunning(false);
   }
 
@@ -211,10 +140,10 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
 
       <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
         {(["geometric", "genetic", "annealing"] as Model[]).map(m => (
-          <button key={m} onClick={() => switchModel(m)} style={{
+          <button key={m} onClick={() => switchModel(m)} disabled={running || smoothRunning} style={{
             flex: 1, padding: "5px 0", border: `1px solid ${model === m ? "#3b82f6" : "#333"}`,
             background: "none", color: model === m ? "#60a5fa" : "#555",
-            borderRadius: 4, cursor: "pointer", fontSize: 11, letterSpacing: 0.5,
+            borderRadius: 4, cursor: running || smoothRunning ? "not-allowed" : "pointer", fontSize: 11, letterSpacing: 0.5,
           }}>
             {m === "geometric" ? "Geometric" : m === "genetic" ? "Genetic" : "Annealing"}
           </button>
@@ -224,30 +153,37 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
       {model !== "geometric" && (
         <Row label="Mutation σ">
           <input type="number" value={sigma} min={0.01} max={0.5} step={0.01}
-            onChange={e => setSigma(parseFloat(e.target.value) || 0.08)} disabled={running} style={numIn} />
+            onChange={e => setSigma(parseFloat(e.target.value) || 0.08)} disabled={running || smoothRunning} style={numIn} />
         </Row>
       )}
+
+      <Row label="Batch">
+        <input type="number" value={batchSize} min={1} max={1000} step={1}
+          onChange={e => setBatchSize(Math.max(1, Math.min(1000, parseInt(e.target.value) || 1)))}
+          disabled={running || smoothRunning} style={numIn} />
+      </Row>
 
       {model === "genetic" && (
         <Row label="Population">
           <input type="number" value={popSize} min={4} max={100} step={2}
-            onChange={e => setPopSize(parseInt(e.target.value) || 20)} disabled={running} style={numIn} />
+            onChange={e => setPopSize(parseInt(e.target.value) || 20)} disabled={running || smoothRunning} style={numIn} />
         </Row>
       )}
       {model === "annealing" && (<>
         <Row label="Temp start">
           <input type="number" value={tempStart} min={0.01} max={10} step={0.1}
-            onChange={e => setTempStart(parseFloat(e.target.value) || 0.5)} disabled={running} style={numIn} />
+            onChange={e => setTempStart(parseFloat(e.target.value) || 0.5)} disabled={running || smoothRunning} style={numIn} />
         </Row>
         <Row label="Cooling">
           <input type="number" value={cooling} min={0.9} max={0.9999} step={0.001}
-            onChange={e => setCooling(parseFloat(e.target.value) || 0.999)} disabled={running} style={numIn} />
+            onChange={e => setCooling(parseFloat(e.target.value) || 0.999)} disabled={running || smoothRunning} style={numIn} />
         </Row>
       </>)}
 
       <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-        <button onClick={running ? stop : start} style={{
-          flex: 1, padding: "7px 0", border: "none", borderRadius: 4, cursor: "pointer",
+        <button onClick={running ? stop : start} disabled={smoothRunning} style={{
+          flex: 1, padding: "7px 0", border: "none", borderRadius: 4,
+          cursor: smoothRunning ? "not-allowed" : "pointer",
           background: running ? "#7f1d1d" : "#14532d", color: running ? "#fca5a5" : "#86efac",
           fontSize: 12, fontWeight: 600, letterSpacing: 1,
         }}>{running ? "STOP" : "START"}</button>
@@ -262,31 +198,49 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
       </div>
 
       <div style={{ marginTop: 10, fontSize: 11, display: "flex", justifyContent: "space-between" }}>
-        <span style={{ color: "#555" }}>
-          {model === "annealing" && annState.current ? `T=${annState.current.temp.toFixed(4)}  ` : ""}
-          Gen {gen}
-        </span>
+        <span style={{ color: "#555" }}>Trials {gen}</span>
         {bestTime !== null && <span style={{ color: "#4ade80", fontVariantNumeric: "tabular-nums" }}>{fmt(bestTime)}</span>}
       </div>
+      {(running || smoothRunning) && <BatchProgress value={batchProgress} />}
 
-      {/* smoothen */}
       <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #1e1e1e" }}>
         <Row label="Smooth σ">
           <input type="range" min={0.01} max={0.2} step={0.005} value={smoothSigma}
             onChange={e => setSmoothSigma(parseFloat(e.target.value))}
+            disabled={running || smoothRunning}
             style={{ width: 80, accentColor: "#a855f7" }} />
           <span style={{ fontSize: 11, color: "#888", width: 34, textAlign: "right" }}>{smoothSigma.toFixed(3)}</span>
         </Row>
+        <Row label="Worse ≤ s">
+          <input type="number" value={smoothAcceptMargin} min={0} max={5} step={0.01}
+            onChange={e => setSmoothAcceptMargin(Math.max(0, parseFloat(e.target.value) || 0))}
+            disabled={running || smoothRunning} style={numIn} />
+        </Row>
         <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-          <button onClick={smoothRunning ? stopSmoothen : startSmoothen} style={{
+          <button onClick={smoothRunning ? stopSmoothen : startSmoothen} disabled={running} style={{
             flex: 1, padding: "5px 0", border: `1px solid ${smoothRunning ? "#6d28d9" : "#7c3aed"}`,
             background: smoothRunning ? "#2e1065" : "none", color: smoothRunning ? "#c4b5fd" : "#a855f7",
-            borderRadius: 4, cursor: "pointer", fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+            borderRadius: 4, cursor: running ? "not-allowed" : "pointer", fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
           }}>{smoothRunning ? "STOP" : "SMOOTHEN"}</button>
         </div>
         <div style={{ marginTop: 6, fontSize: 11, color: "#555" }}>
           Trials {smoothTrials}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchProgress({ value }: { value: number }) {
+  const pct = Math.max(0, Math.min(1, value));
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#555", marginBottom: 3 }}>
+        <span>Batch</span>
+        <span>{Math.round(pct * 100)}%</span>
+      </div>
+      <div style={{ height: 5, background: "#1a1a1a", borderRadius: 999, overflow: "hidden", border: "1px solid #252525" }}>
+        <div style={{ width: `${pct * 100}%`, height: "100%", background: "#3b82f6", transition: "width 80ms linear" }} />
       </div>
     </div>
   );

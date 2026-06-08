@@ -1,22 +1,22 @@
-import { useState, useMemo, useCallback, useRef } from "react";
+import { useState, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { SectionTable } from "./components/SectionTable.tsx";
 import { VehicleForm } from "./components/VehicleForm.tsx";
-import { Results } from "./components/Results.tsx";
 import { TrackCanvas } from "./components/TrackCanvas.tsx";
 import { CarIoPanel, TrackIoPanel } from "./components/IoPanel.tsx";
-import { OptimizerPanel } from "./components/OptimizerPanel.tsx";
 import {
   buildBezierSegments,
   sampleCentreLine,
   centreSamplesToTrackPoints,
   computeHalfWidths,
+  racingLineFromOffsets,
 } from "./geometry.js";
-import { simulateHotLap } from "./integrator.js";
-import { offsetsToTrackPoints } from "./optimizer.js";
 import type { CrossSection, RacingLineSample } from "./geometry.js";
 import type { VehicleParams } from "./vehicle.js";
 import type { SimResult } from "./integrator.js";
 import type { Offsets } from "./optimizer.js";
+
+const Results = lazy(() => import("./components/Results.tsx").then(m => ({ default: m.Results })));
+const OptimizerPanel = lazy(() => import("./components/OptimizerPanel.tsx").then(m => ({ default: m.OptimizerPanel })));
 
 const DEFAULT_SECTIONS: CrossSection[] = [
   { id: "1", x: 0,    y: 0,    direction: 0,   width: 12 },
@@ -35,6 +35,8 @@ const DEFAULT_VEHICLE: VehicleParams = {
   curveMode: "torque", finalDrive: 8.5, wheelRadius: 0.33,
   drivetrainLayout: "RWD", brakeBias: 0.6, diffLockRear: 0.0, diffLockFront: 0.0,
   weightDistFront: 0.45, wheelbase: 2.5, trackWidth: 1.8, cgHeight: 0.35,
+  yawInertia: 900, steeringLockDeg: 32,
+  corneringStiffnessFront: 70000, corneringStiffnessRear: 80000, yawDragK: 0.15,
   powerCurve: [
     { x: 2000, y: 300 }, { x: 4000, y: 380 }, { x: 6000, y: 420 },
     { x: 8000, y: 400 }, { x: 10000, y: 340 }, { x: 12000, y: 250 },
@@ -45,20 +47,6 @@ function formatLapTime(t: number): string {
   const m = Math.floor(t / 60);
   const s = (t % 60).toFixed(3).padStart(6, "0");
   return m > 0 ? `${m}:${s}` : `${t.toFixed(3)}s`;
-}
-
-function offsetsToRacingLine(
-  offsets: Offsets, hw: Float64Array,
-  samples: { x: number; y: number; tangentAngle: number }[],
-): RacingLineSample[] {
-  const n = offsets.length;
-  const xs = new Float64Array(n), ys = new Float64Array(n), tg = new Float64Array(n);
-  for (let i = 0; i < n; i++) { xs[i] = samples[i].x; ys[i] = samples[i].y; tg[i] = samples[i].tangentAngle; }
-  const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tg);
-  return pts.map((tp, i) => {
-    const p = tp as typeof tp & { _x: number; _y: number };
-    return { x: p._x ?? samples[i].x, y: p._y ?? samples[i].y, distance: tp.distance, radius: tp.radius };
-  });
 }
 
 // ── shared style tokens ───────────────────────────────────────────────────────
@@ -121,7 +109,7 @@ export default function App() {
 
   const racingLine = useMemo((): RacingLineSample[] => {
     if (optOffsets && optOffsets.length === centreSamples.length)
-      return offsetsToRacingLine(optOffsets, hw, centreSamples);
+      return racingLineFromOffsets(optOffsets, hw, centreSamples);
     return centreSamples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius }));
   }, [optOffsets, hw, centreSamples]);
 
@@ -134,8 +122,9 @@ export default function App() {
 
   const hasInvalid = segments.some(s => s.invalid);
 
-  function runSim() {
+  async function runSim() {
     if (trackPoints.length < 2) return;
+    const { simulateHotLap } = await import("./integrator.js");
     const r = simulateHotLap(vehicle, trackPoints);
     setResult(r);
     setShowResults(true);
@@ -158,11 +147,16 @@ export default function App() {
     reader.readAsDataURL(file);
   }
 
-  const handleBestOffsets = useCallback((offsets: Offsets, lapTime?: number) => {
-    setOptOffsets(new Float64Array(offsets));
+  const handleBestOffsets = useCallback(async (offsets: Offsets) => {
+    const nextOffsets = new Float64Array(offsets);
+    setOptOffsets(nextOffsets);
     setUseOptLine(true);
-    if (lapTime !== undefined) setResult(prev => prev ? { ...prev, lapTime } : null);
-  }, []);
+    const nextLine = racingLineFromOffsets(nextOffsets, hw, centreSamples);
+    const nextTrackPoints = nextLine.map(s => ({ distance: s.distance, radius: s.radius }));
+    const { simulateHotLap } = await import("./integrator.js");
+    setResult(simulateHotLap(vehicle, nextTrackPoints));
+    setShowResults(true);
+  }, [centreSamples, hw, vehicle]);
 
   const handleDragSections   = useCallback((s: CrossSection[]) => setDisplaySections(s), []);
   const handleCommitSections = useCallback((s: CrossSection[]) => {
@@ -232,7 +226,9 @@ export default function App() {
         </div>
         {result && (
           <div style={{ height: 220, borderTop: "1px solid #1e1e1e", flexShrink: 0 }}>
-            <Results result={result} />
+            <Suspense fallback={null}>
+              <Results result={result} />
+            </Suspense>
           </div>
         )}
       </main>
@@ -281,12 +277,14 @@ export default function App() {
 
         {/* sections + optimizer */}
         <SectionTable sections={committedSections} selectedId={selectedId} onChange={handleCommitSections} onSelect={setSelectedId} />
-        <OptimizerPanel
-          centreSamples={centreSamples} hw={hw}
-          seed={optOffsets ?? new Float64Array(centreSamples.length)}
-          vehicle={vehicle} onBestOffsets={handleBestOffsets}
-          onLineReset={() => { setOptOffsets(null); setUseOptLine(false); setResult(null); }}
-        />
+        <Suspense fallback={<div style={{ padding: "12px 16px", color: "#555", fontSize: 12 }}>Loading optimizer…</div>}>
+          <OptimizerPanel
+            centreSamples={centreSamples} hw={hw}
+            seed={optOffsets ?? new Float64Array(centreSamples.length)}
+            vehicle={vehicle} onBestOffsets={handleBestOffsets}
+            onLineReset={() => { setOptOffsets(null); setUseOptLine(false); setResult(null); }}
+          />
+        </Suspense>
         <TrackIoPanel
           sections={committedSections} racingLineOffsets={optOffsets}
           centreSamples={centreSamples} sessionName={trackName}

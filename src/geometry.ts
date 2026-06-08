@@ -109,7 +109,7 @@ export function buildBezierSegments(sections: CrossSection[], closed = true): Be
 
 // ── Centre-line sampling ──────────────────────────────────────────────────────
 
-const SAMPLE_STEP = 5; // metres
+const SAMPLE_STEP = 3; // metres
 const LUT_STEPS = 200;
 
 function buildArcLUT(seg: BezierSegment): number[] {
@@ -231,6 +231,53 @@ export interface RacingLineSample {
   x: number; y: number;
   distance: number;
   radius: number;
+}
+
+export function racingLineFromOffsets(
+  offsets: Float64Array,
+  hw: Float64Array,
+  samples: { x: number; y: number; tangentAngle: number }[],
+): RacingLineSample[] {
+  const n = offsets.length;
+  const world: Vec2[] = [];
+  const line: RacingLineSample[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const ox = -Math.sin(samples[i].tangentAngle) * hw[i] * offsets[i] * 2;
+    const oy =  Math.cos(samples[i].tangentAngle) * hw[i] * offsets[i] * 2;
+    world.push({ x: samples[i].x + ox, y: samples[i].y + oy });
+  }
+
+  let dist = 0;
+  for (let i = 0; i < n; i++) {
+    if (i > 0) dist += len(sub(world[i], world[i - 1]));
+    line.push({ x: world[i].x, y: world[i].y, distance: dist, radius: Infinity });
+  }
+
+  const rawK = new Float64Array(n);
+  const STENCIL = 2;
+  for (let i = 0; i < n; i++) {
+    const a = world[(i - STENCIL + n) % n];
+    const q = world[i];
+    const b = world[(i + STENCIL) % n];
+    const dax = q.x - a.x, day = q.y - a.y;
+    const dbx = b.x - q.x, dby = b.y - q.y;
+    const la = Math.hypot(dax, day);
+    const lb = Math.hypot(dbx, dby);
+    const lc = Math.hypot(b.x - a.x, b.y - a.y);
+    const cross = dax * dby - day * dbx;
+    if (Math.abs(cross) > 1e-9 && la > 1e-6 && lb > 1e-6 && lc > 1e-6) {
+      const radius = (la * lb * lc) / Math.abs(cross);
+      rawK[i] = Math.sign(cross) / radius;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const kappa = rawK[i];
+    line[i].radius = Math.abs(kappa) < 1e-12 ? Infinity : 1 / kappa;
+  }
+
+  return line;
 }
 
 // Returns offset ∈ [-0.5, 0.5] per sample: -0.5=left edge, +0.5=right edge

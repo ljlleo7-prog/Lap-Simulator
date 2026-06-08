@@ -339,9 +339,9 @@ export function TrackCanvas({
             strokeWidth={u * 0.001} strokeDasharray={`${vb.w * 0.012} ${vb.w * 0.006}`} />
         )}
 
-        {racingLine.length > 1 && racingLine.map((s, i) => {
+        {activeLine.length > 1 && activeLine.map((s, i) => {
           if (i === 0) return null;
-          const prev = racingLine[i - 1];
+          const prev = activeLine[i - 1];
           const col = result ? speedColor(speeds[i] ?? 0, minSpeed, maxSpeed) : "#3b82f6";
           return <line key={i} x1={prev.x} y1={prev.y} x2={s.x} y2={s.y}
             stroke={col} strokeWidth={u * (useOptLine ? 0.004 : 0.002)} opacity={useOptLine ? 1 : 0.4} />;

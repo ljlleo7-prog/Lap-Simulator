@@ -29,6 +29,8 @@ const PRESETS: { label: string; description: string; values: VehicleParams }[] =
       curveMode: "torque", finalDrive: 12.0, wheelRadius: 0.215,
       drivetrainLayout: "RWD", brakeBias: 0.0, diffLockRear: 1.0, diffLockFront: 0.0,
       weightDistFront: 0.43, wheelbase: 1.05, trackWidth: 1.4, cgHeight: 0.27,
+      yawInertia: 35, steeringLockDeg: 35,
+      corneringStiffnessFront: 9000, corneringStiffnessRear: 12000, yawDragK: 0.35,
       powerCurve: [
         { x: 4000, y: 12 }, { x: 6000, y: 18 }, { x: 8000, y: 25 },
         { x: 10000, y: 28 }, { x: 12000, y: 27 }, { x: 14000, y: 22 },
@@ -38,21 +40,24 @@ const PRESETS: { label: string; description: string; values: VehicleParams }[] =
   {
     label: "Entertainment Kart (200cc)",
     description:
-      "Adult rental / entertainment kart — e.g. 丰速200cc, RT8-class single-speed karts. " +
-      "Single-speed spool axle, governed to ~60–80 km/h. Much heavier and less grippy than shifter karts. " +
+      "Adult rental / entertainment kart — e.g. 丰速200cc / GX200-class single-speed karts. " +
+      "Single-speed spool axle, governed to ~55–70 km/h with a ~6.5 hp / 4.8 kW engine. " +
+      "Much heavier and less grippy than shifter karts. " +
       "tyreDragK is higher (0.28) because rental kart tyres run at higher slip angles and often on worn compound. " +
       "Brake bias rear-only (0%) same as all karts. " +
-      "Setup tip: 丰速/RT8 tracks are typically tight with short straights — the optimizer will strongly favour apex widening. " +
-      "Reducing muLat toward 1.4–1.5 better matches worn rental tyre grip. Peak ~9 kW.",
+      "Setup tip: 丰速/GX200 tracks are typically tight with short straights — the optimizer will strongly favour apex widening. " +
+      "μ around 0.9–1.0 better matches worn rental tyre grip than race-kart tyre values.",
     values: {
       mass: 200, dragArea: 0.38, liftArea: 0.0,
-      muLat: 1.55, muLon: 1.55, tyreDragK: 0.28,
+      muLat: 0.95, muLon: 0.95, tyreDragK: 0.28,
       curveMode: "power", finalDrive: 10.0, wheelRadius: 0.215,
       drivetrainLayout: "RWD", brakeBias: 0.0, diffLockRear: 1.0, diffLockFront: 0.0,
       weightDistFront: 0.42, wheelbase: 1.05, trackWidth: 1.35, cgHeight: 0.29,
+      yawInertia: 42, steeringLockDeg: 34,
+      corneringStiffnessFront: 7000, corneringStiffnessRear: 9500, yawDragK: 0.45,
       powerCurve: [
-        { x: 0, y: 7 }, { x: 30, y: 9 }, { x: 50, y: 9 },
-        { x: 70, y: 7 }, { x: 85, y: 4 },
+        { x: 0, y: 2.5 }, { x: 20, y: 4.2 }, { x: 35, y: 4.8 },
+        { x: 50, y: 4.5 }, { x: 60, y: 3.5 }, { x: 70, y: 1.5 },
       ],
     },
   },
@@ -70,6 +75,8 @@ const PRESETS: { label: string; description: string; values: VehicleParams }[] =
       curveMode: "torque", finalDrive: 7.0, wheelRadius: 0.33,
       drivetrainLayout: "RWD", brakeBias: 0.62, diffLockRear: 0.3, diffLockFront: 0.0,
       weightDistFront: 0.45, wheelbase: 3.1, trackWidth: 1.8, cgHeight: 0.30,
+      yawInertia: 950, steeringLockDeg: 25,
+      corneringStiffnessFront: 120000, corneringStiffnessRear: 140000, yawDragK: 0.08,
       powerCurve: [
         { x: 4000, y: 400 }, { x: 7000, y: 520 }, { x: 10000, y: 580 },
         { x: 13000, y: 540 }, { x: 16000, y: 440 }, { x: 18000, y: 330 },
@@ -90,6 +97,8 @@ const PRESETS: { label: string; description: string; values: VehicleParams }[] =
       curveMode: "torque", finalDrive: 6.5, wheelRadius: 0.34,
       drivetrainLayout: "RWD", brakeBias: 0.58, diffLockRear: 0.5, diffLockFront: 0.0,
       weightDistFront: 0.46, wheelbase: 2.7, trackWidth: 2.0, cgHeight: 0.45,
+      yawInertia: 1800, steeringLockDeg: 30,
+      corneringStiffnessFront: 95000, corneringStiffnessRear: 105000, yawDragK: 0.14,
       powerCurve: [
         { x: 2000, y: 500 }, { x: 4000, y: 620 }, { x: 6000, y: 650 },
         { x: 7000, y: 600 }, { x: 8000, y: 500 }, { x: 9000, y: 380 },
@@ -110,6 +119,8 @@ const PRESETS: { label: string; description: string; values: VehicleParams }[] =
       curveMode: "power", finalDrive: 8.0, wheelRadius: 0.32,
       drivetrainLayout: "FWD", brakeBias: 0.65, diffLockRear: 0.0, diffLockFront: 0.0,
       weightDistFront: 0.60, wheelbase: 2.6, trackWidth: 1.7, cgHeight: 0.55,
+      yawInertia: 2200, steeringLockDeg: 34,
+      corneringStiffnessFront: 60000, corneringStiffnessRear: 52000, yawDragK: 0.20,
       powerCurve: [
         { x: 0, y: 100 }, { x: 50, y: 120 }, { x: 100, y: 115 },
         { x: 150, y: 100 }, { x: 200, y: 75 }, { x: 250, y: 50 },
@@ -130,13 +141,18 @@ const NUM_FIELDS: { key: keyof VehicleParams; label: string; unit: string; min: 
 ];
 
 const CHASSIS_FIELDS: { key: keyof VehicleParams; label: string; unit: string; min: number; step: number; max?: number }[] = [
-  { key: "weightDistFront", label: "Front weight",    unit: "%",   min: 0.1,  step: 0.01, max: 0.9 },
-  { key: "wheelbase",       label: "Wheelbase",       unit: "m",   min: 0.8,  step: 0.05 },
-  { key: "trackWidth",      label: "Track width",     unit: "m",   min: 0.8,  step: 0.05 },
-  { key: "cgHeight",        label: "CG height",       unit: "m",   min: 0.1,  step: 0.01 },
-  { key: "brakeBias",       label: "Brake bias (F)",  unit: "%",   min: 0,    step: 0.01, max: 1.0 },
-  { key: "diffLockRear",    label: "Rear diff lock",  unit: "",    min: 0,    step: 0.05, max: 1.0 },
-  { key: "diffLockFront",   label: "Front diff lock", unit: "",    min: 0,    step: 0.05, max: 1.0 },
+  { key: "weightDistFront", label: "Front weight",    unit: "%",     min: 0.1,  step: 0.01, max: 0.9 },
+  { key: "wheelbase",       label: "Wheelbase",       unit: "m",     min: 0.8,  step: 0.05 },
+  { key: "trackWidth",      label: "Track width",     unit: "m",     min: 0.8,  step: 0.05 },
+  { key: "cgHeight",        label: "CG height",       unit: "m",     min: 0.1,  step: 0.01 },
+  { key: "yawInertia",      label: "Yaw inertia",     unit: "kgm²",  min: 10,   step: 10 },
+  { key: "steeringLockDeg", label: "Steer lock",      unit: "°",     min: 5,    step: 1,    max: 60 },
+  { key: "corneringStiffnessFront", label: "Front Cα", unit: "N/rad", min: 1000, step: 1000 },
+  { key: "corneringStiffnessRear",  label: "Rear Cα",  unit: "N/rad", min: 1000, step: 1000 },
+  { key: "yawDragK",        label: "Yaw drag k",      unit: "",      min: 0,    step: 0.01, max: 1.0 },
+  { key: "brakeBias",       label: "Brake bias (F)",  unit: "%",    min: 0,    step: 0.01, max: 1.0 },
+  { key: "diffLockRear",    label: "Rear diff lock",  unit: "",      min: 0,    step: 0.05, max: 1.0 },
+  { key: "diffLockFront",   label: "Front diff lock", unit: "",      min: 0,    step: 0.05, max: 1.0 },
 ];
 
 export function VehicleForm({ params, onChange }: Props) {

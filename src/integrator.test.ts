@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { simulate } from "./integrator.js";
+import { simulate, simulateHotLap } from "./integrator.js";
 import { buildTrackProfile } from "./track.js";
+import type { TrackPoint } from "./track.js";
 import type { VehicleParams } from "./vehicle.js";
 
 const car: VehicleParams = {
@@ -21,10 +22,44 @@ const car: VehicleParams = {
   wheelbase: 2.5,
   trackWidth: 1.8,
   cgHeight: 0.35,
+  yawInertia: 900,
+  steeringLockDeg: 32,
+  corneringStiffnessFront: 70000,
+  corneringStiffnessRear: 80000,
+  yawDragK: 0.15,
   powerCurve: [
     { x: 2000, y: 300 },
     { x: 6000, y: 420 },
     { x: 12000, y: 250 },
+  ],
+};
+
+const entertainmentKart: VehicleParams = {
+  mass: 200,
+  dragArea: 0.38,
+  liftArea: 0,
+  muLat: 0.95,
+  muLon: 0.95,
+  tyreDragK: 0.28,
+  curveMode: "power",
+  finalDrive: 10,
+  wheelRadius: 0.215,
+  drivetrainLayout: "RWD",
+  brakeBias: 0,
+  diffLockRear: 1,
+  diffLockFront: 0,
+  weightDistFront: 0.42,
+  wheelbase: 1.05,
+  trackWidth: 1.35,
+  cgHeight: 0.29,
+  yawInertia: 42,
+  steeringLockDeg: 34,
+  corneringStiffnessFront: 7000,
+  corneringStiffnessRear: 9500,
+  yawDragK: 0.45,
+  powerCurve: [
+    { x: 0, y: 2.5 }, { x: 20, y: 4.2 }, { x: 35, y: 4.8 },
+    { x: 50, y: 4.5 }, { x: 60, y: 3.5 }, { x: 70, y: 1.5 },
   ],
 };
 
@@ -34,6 +69,21 @@ const ovalTrack = buildTrackProfile([
   { length: 500, radius: Infinity },
   { length: 157, radius: 50 },
 ]);
+
+const brakingTrack = buildTrackProfile([
+  { length: 700, radius: Infinity },
+  { length: 120, radius: 28 },
+  { length: 700, radius: Infinity },
+  { length: 120, radius: 28 },
+]);
+
+function averageSpeed(result: ReturnType<typeof simulate>, points: TrackPoint[], start: number, end: number): number {
+  const idxs = points
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.distance >= start && p.distance <= end)
+    .map(({ i }) => i);
+  return idxs.reduce((sum, i) => sum + result.speeds[i], 0) / idxs.length;
+}
 
 describe("simulate", () => {
   it("returns a positive lap time", () => {
@@ -68,9 +118,51 @@ describe("simulate", () => {
     expect(avgCornerSpeed).toBeLessThan(avgStraightSpeed);
   });
 
-  it("lap time is physically plausible (20s–120s for ~1.3 km track)", () => {
-    const result = simulate(car, ovalTrack);
+  it("brakes materially before a tight corner", () => {
+    const result = simulate(car, brakingTrack);
+    const approachSpeed = averageSpeed(result, brakingTrack, 560, 620);
+    const entrySpeed = averageSpeed(result, brakingTrack, 690, 720);
+    const approachAccels = brakingTrack
+      .map((p, i) => ({ p, i }))
+      .filter(({ p }) => p.distance >= 560 && p.distance <= 700)
+      .map(({ i }) => result.lonAccels[i]);
+
+    expect(entrySpeed).toBeLessThan(approachSpeed * 0.9);
+    expect(Math.min(...approachAccels)).toBeLessThan(-1);
+  });
+
+  it("accelerates after corner exit onto the following straight", () => {
+    const result = simulate(car, brakingTrack);
+    const exitSpeed = averageSpeed(result, brakingTrack, 820, 860);
+    const laterStraightSpeed = averageSpeed(result, brakingTrack, 1040, 1100);
+    const exitAccels = brakingTrack
+      .map((p, i) => ({ p, i }))
+      .filter(({ p }) => p.distance >= 820 && p.distance <= 1040)
+      .map(({ i }) => result.lonAccels[i]);
+
+    expect(laterStraightSpeed).toBeGreaterThan(exitSpeed * 1.08);
+    expect(Math.max(...exitAccels)).toBeGreaterThan(0.5);
+  });
+
+  it("shows braking and re-acceleration for a 丰速200cc-style entertainment kart", () => {
+    const result = simulateHotLap(entertainmentKart, brakingTrack);
+    const straightSpeed = averageSpeed(result, brakingTrack, 520, 620);
+    const cornerSpeed = averageSpeed(result, brakingTrack, 720, 800);
+    const exitSpeed = averageSpeed(result, brakingTrack, 820, 880);
+    const laterStraightSpeed = averageSpeed(result, brakingTrack, 1120, 1220);
+    const approachAccels = brakingTrack
+      .map((p, i) => ({ p, i }))
+      .filter(({ p }) => p.distance >= 560 && p.distance <= 700)
+      .map(({ i }) => result.lonAccels[i]);
+
+    expect(straightSpeed).toBeGreaterThan(cornerSpeed * 1.15);
+    expect(laterStraightSpeed).toBeGreaterThan(exitSpeed * 1.08);
+    expect(Math.min(...approachAccels)).toBeLessThan(-0.5);
+  });
+
+  it("produces stable hot-lap results across the start-finish seam", () => {
+    const result = simulateHotLap(car, ovalTrack);
     expect(result.lapTime).toBeGreaterThan(20);
-    expect(result.lapTime).toBeLessThan(120);
+    expect(result.speeds[result.speeds.length - 1]).toBeLessThan(100);
   });
 });

@@ -1,5 +1,6 @@
-import type { TrackPoint } from "./track.js";
 import { simulateHotLap } from "./integrator.js";
+import { racingLineFromOffsets } from "./geometry.js";
+import type { TrackPoint } from "./track.js";
 import type { VehicleParams } from "./vehicle.js";
 
 // offset ∈ [-0.5, 0.5] per track sample, half-widths in metres
@@ -43,46 +44,20 @@ export function offsetsToTrackPoints(
   ys: Float64Array,
   tangents: Float64Array, // tangentAngle per sample
 ): TrackPoint[] {
-  const n = offsets.length;
-  const pts: TrackPoint[] = [];
-  let dist = 0;
-  for (let i = 0; i < n; i++) {
-    const ox = -Math.sin(tangents[i]) * hw[i] * offsets[i] * 2;
-    const oy =  Math.cos(tangents[i]) * hw[i] * offsets[i] * 2;
-    const rx = xs[i] + ox;
-    const ry = ys[i] + oy;
+  const samples = Array.from(offsets, (_, i) => ({ x: xs[i], y: ys[i], tangentAngle: tangents[i] }));
+  return racingLineFromOffsets(offsets, hw, samples).map(s => ({ distance: s.distance, radius: s.radius }));
+}
 
-    if (i > 0) {
-      const prev = pts[i - 1] as TrackPoint & { _x: number; _y: number };
-      dist += Math.sqrt((rx - prev._x) ** 2 + (ry - prev._y) ** 2);
-    }
-
-    // local radius from three consecutive points
-    let radius = Infinity;
-    if (i > 0 && i < n - 1) {
-      const pi = i - 1, ni = i + 1;
-      const pox = -Math.sin(tangents[pi]) * hw[pi] * offsets[pi] * 2;
-      const poy =  Math.cos(tangents[pi]) * hw[pi] * offsets[pi] * 2;
-      const nox = -Math.sin(tangents[ni]) * hw[ni] * offsets[ni] * 2;
-      const noy =  Math.cos(tangents[ni]) * hw[ni] * offsets[ni] * 2;
-      const ax = xs[pi] + pox, ay = ys[pi] + poy;
-      const bx = xs[ni] + nox, by = ys[ni] + noy;
-      const dax = rx - ax, day = ry - ay;
-      const dbx = bx - rx, dby = by - ry;
-      // circumradius = |PA|*|PB|*|AB| / (2 * triangle_area); cr = 2*area via cross-product
-      const pa = Math.sqrt(dax*dax + day*day);
-      const pb = Math.sqrt(dbx*dbx + dby*dby);
-      const ab = Math.sqrt((bx-ax)*(bx-ax) + (by-ay)*(by-ay));
-      const cr = Math.abs(dax * dby - day * dbx); // 2 * triangle area
-      if (cr > 1e-10)
-        radius = (pa * pb * ab) / cr;
-    }
-
-    const tp = { distance: dist, radius } as TrackPoint & { _x: number; _y: number };
-    tp._x = rx; tp._y = ry;
-    pts.push(tp);
-  }
-  return pts;
+export function lapTimeForOffsets(
+  offsets: Offsets,
+  vehicle: VehicleParams,
+  hw: Float64Array,
+  xs: Float64Array,
+  ys: Float64Array,
+  tangents: Float64Array,
+): number {
+  const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
+  return simulateHotLap(vehicle, pts).lapTime;
 }
 
 export function fitness(
@@ -93,8 +68,7 @@ export function fitness(
   ys: Float64Array,
   tangents: Float64Array,
 ): number {
-  const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
-  return simulateHotLap(vehicle, pts).lapTime;
+  return lapTimeForOffsets(offsets, vehicle, hw, xs, ys, tangents);
 }
 
 export interface GenResult {
@@ -287,24 +261,20 @@ export function runGeometricPass(
       const i = (apex + k + n) % n;
       const phase = (k + zoneHalf) / (2 * zoneHalf); // 0=entry, 1=exit
 
-      // Late-apex curve: entry wide, apex at ~0.6-0.7 phase, exit wide
-      const apexPhase = 0.6 + exitBias * 0.1;
+      const apexPhase = 0.62 + exitBias * 0.12;
       let insideness: number;
       if (phase < apexPhase) {
-        // ramp from -0.45 (outside) to +0.4 (inside at apex)
-        insideness = -0.45 + (0.85 * phase / apexPhase);
+        insideness = -0.48 + 0.94 * phase / apexPhase;
       } else {
-        // ramp from apex back to outside, faster exit push for long straights
-        const exitWidth = 0.35 + exitBias * 0.1;
-        insideness = 0.4 - exitWidth * (phase - apexPhase) / (1 - apexPhase);
+        const exitOutside = 0.42 + exitBias * 0.06;
+        const t = (phase - apexPhase) / (1 - apexPhase);
+        insideness = 0.46 + (-exitOutside - 0.46) * t;
       }
 
-      // Convert to offset: inside = +dir * positive_half
       const target = clamp(dir * insideness);
 
-      // Blend: corners dominate, straights relax — weight by local normK
-      const localNorm = absK[i] / maxAbsK;
-      const blend = Math.min(1, localNorm / PEAK_THRESH) * normK;
+      const zoneWeight = Math.sin(Math.PI * phase);
+      const blend = Math.min(1, 0.35 + 0.65 * zoneWeight);
       candidate[i] = clamp(candidate[i] * (1 - blend) + target * blend);
     }
 
@@ -319,15 +289,12 @@ export function runGeometricPass(
     }
   }
 
-  // ── 4. Accept only if lap time improves ─────────────────────────────────
-  const f0 = fitness(offsets,   vehicle, hw, xs, ys, tg);
-  const f1 = fitness(candidate, vehicle, hw, xs, ys, tg);
-  return f1 < f0 ? candidate : offsets;
+  return candidate;
 }
 
-// Pick a random spot on the track, apply a localised Gaussian blend centred
-// there, and accept only if lap time improves. Returns the improved offsets or
-// null when the trial made no improvement.
+// Smooth a randomized local window rather than the entire lap at once.
+// Local trials let the acceptance gate pass/reject small changes instead of
+// rejecting one globally expensive full-line blur.
 export function runSmoothenStep(
   offsets: Offsets,
   vehicle: VehicleParams,
@@ -338,25 +305,40 @@ export function runSmoothenStep(
   gaussianSigma: number, // fraction of n samples, e.g. 0.04
 ): Offsets | null {
   const n = offsets.length;
-  const centre = Math.floor(Math.random() * n);
-  const sigSamples = Math.max(1, gaussianSigma * n);
-  const radius = Math.ceil(sigSamples * 3);
+  const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
 
-  // Build a candidate that blends only the window around `centre`.
-  const candidate = new Float64Array(offsets);
-  for (let k = -radius; k <= radius; k++) {
-    const i = (centre + k + n) % n;
-    const w = Math.exp(-(k * k) / (2 * sigSamples * sigSamples));
-    // weighted average toward the local mean of its two neighbours
-    const prev = offsets[(i - 1 + n) % n];
-    const next = offsets[(i + 1) % n];
-    const target = (prev + next) / 2;
-    candidate[i] = clamp(offsets[i] + w * (target - offsets[i]));
+  const rawK = new Float64Array(n);
+  let maxK = 1e-9;
+  for (let i = 0; i < n; i++) {
+    rawK[i] = pts[i].radius === Infinity ? 0 : 1 / pts[i].radius;
+    maxK = Math.max(maxK, Math.abs(rawK[i]));
   }
 
-  const f0 = fitness(offsets,   vehicle, hw, xs, ys, tangents);
-  const f1 = fitness(candidate, vehicle, hw, xs, ys, tangents);
-  return f1 < f0 ? candidate : null;
+  const sigSamples = Math.max(2, gaussianSigma * n);
+  const radius = Math.max(2, Math.ceil(sigSamples * (0.6 + Math.random() * 1.8)));
+  const center = Math.floor(Math.random() * n);
+  const out = new Float64Array(offsets);
+  const baseStrength = 0.18 + Math.random() * 0.42;
+
+  for (let k = -radius; k <= radius; k++) {
+    const i = (center + k + n) % n;
+    const cornerness = Math.min(1, Math.abs(rawK[i]) / maxK);
+    const straightness = 1 - Math.sqrt(cornerness);
+    const localWeight = Math.exp(-(k * k) / (2 * radius * radius * 0.18));
+    const strength = baseStrength * (0.2 + 0.8 * straightness) * localWeight;
+
+    let sum = 0, wsum = 0;
+    for (let jOff = -radius; jOff <= radius; jOff++) {
+      const j = (i + jOff + n) % n;
+      const w = Math.exp(-(jOff * jOff) / (2 * sigSamples * sigSamples));
+      sum += offsets[j] * w;
+      wsum += w;
+    }
+    const blurred = sum / Math.max(wsum, 1e-9);
+    out[i] = clamp(offsets[i] + (blurred - offsets[i]) * strength);
+  }
+
+  return out;
 }
 
 // Pull each offset toward the mean of its neighbours, weighted by how straight
