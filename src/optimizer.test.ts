@@ -66,7 +66,7 @@ describe("offsetsToTrackPoints", () => {
     }
 
     const points = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
-    expect(fitness(offsets, vehicle, hw, xs, ys, tangents)).toBeCloseTo(simulateHotLap(vehicle, points).lapTime, 8);
+    expect(fitness(offsets, vehicle, hw, xs, ys, tangents)).toBeCloseTo(simulateHotLap(vehicle, points, hw).lapTime, 8);
     expect(fitness(offsets, vehicle, hw, xs, ys, tangents)).toBeCloseTo(lapTimeForOffsets(offsets, vehicle, hw, xs, ys, tangents), 8);
   });
 

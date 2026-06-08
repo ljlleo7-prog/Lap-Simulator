@@ -229,6 +229,45 @@ export interface LateralGripState {
   kineticExcessRatio: number;
 }
 
+export interface AxleLateralGripState {
+  frontSlideRatio: number;
+  rearSlideRatio: number;
+  frontKineticExcessRatio: number;
+  rearKineticExcessRatio: number;
+  frontDemand: number;
+  rearDemand: number;
+  frontKineticLimit: number;
+  rearKineticLimit: number;
+}
+
+export function axleLateralGripState(raw: VehicleParams, v: number, latAccelDemand: number): AxleLateralGripState {
+  const p = params(raw);
+  const demand = Math.abs(latAccelDemand);
+  const [frontLoad, rearLoad] = axleLoads(p, v, 0);
+  const normalLoad = Math.max(frontLoad + rearLoad, 1);
+  const frontShare = Math.max(0.05, Math.min(0.95, p.weightDistFront));
+  const rearShare = 1 - frontShare;
+  const drivenFront = p.drivetrainLayout === "FWD" || p.drivetrainLayout === "4WD";
+  const drivenRear = p.drivetrainLayout === "RWD" || p.drivetrainLayout === "4WD";
+  const frontDriveBias = drivenFront ? 0.16 * (1 + p.diffLockFront) : 0;
+  const rearDriveBias = drivenRear ? 0.16 * (1 + p.diffLockRear) : 0;
+  const frontDemandShare = Math.max(0.05, frontShare + frontDriveBias - rearDriveBias * 0.35);
+  const rearDemandShare = Math.max(0.05, rearShare + rearDriveBias - frontDriveBias * 0.35);
+  const shareTotal = frontDemandShare + rearDemandShare;
+  const frontDemand = demand * frontDemandShare / shareTotal;
+  const rearDemand = demand * rearDemandShare / shareTotal;
+  const kineticRatio = Math.max(0.1, Math.min(1, p.kineticGripRatio ?? 0.8));
+  const frontStaticLimit = p.muLat * frontLoad / p.mass;
+  const rearStaticLimit = p.muLat * rearLoad / p.mass;
+  const frontKineticLimit = frontStaticLimit * kineticRatio * normalLoad / Math.max(frontLoad + rearLoad, 1);
+  const rearKineticLimit = rearStaticLimit * kineticRatio * normalLoad / Math.max(frontLoad + rearLoad, 1);
+  const frontSlideRatio = Math.max(0, frontDemand / Math.max(frontStaticLimit, 1e-6) - 1);
+  const rearSlideRatio = Math.max(0, rearDemand / Math.max(rearStaticLimit, 1e-6) - 1);
+  const frontKineticExcessRatio = Math.max(0, frontDemand / Math.max(frontKineticLimit, 1e-6) - 1);
+  const rearKineticExcessRatio = Math.max(0, rearDemand / Math.max(rearKineticLimit, 1e-6) - 1);
+  return { frontSlideRatio, rearSlideRatio, frontKineticExcessRatio, rearKineticExcessRatio, frontDemand, rearDemand, frontKineticLimit, rearKineticLimit };
+}
+
 export function maxKineticLateralAccel(raw: VehicleParams, v: number): number {
   const p = params(raw);
   const ratio = Math.max(0.1, Math.min(1, p.kineticGripRatio ?? 0.8));

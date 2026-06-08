@@ -2,6 +2,8 @@ import { useRef, useCallback, useState, useEffect } from "react";
 import type { CrossSection, BezierSegment, CentreSample, RacingLineSample } from "../geometry.js";
 import { edgePoints } from "../geometry.js";
 import type { SimResult } from "../integrator.js";
+import type { VehicleParams } from "../vehicle.js";
+import { steerAngleForRadius } from "../vehicle.js";
 
 interface Props {
   sections: CrossSection[];
@@ -10,6 +12,12 @@ interface Props {
   racingLine: RacingLineSample[];
   useOptLine: boolean;
   result: SimResult | null;
+  vehicle: VehicleParams;
+  pathDisplay: "intended" | "drifted" | "both";
+  playbackLine: RacingLineSample[];
+  playbackIndex: number;
+  playbackAlpha: number;
+  playbackActive: boolean;
   selectedId: string | null;
   onDrag: (s: CrossSection[]) => void;
   onCommit: (s: CrossSection[]) => void;
@@ -62,9 +70,42 @@ type DragMode =
 
 interface HoverInfo { sampleIndex: number }
 
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function driftedPath(line: RacingLineSample[], lateralOffsets: Float64Array | undefined): RacingLineSample[] {
+  if (!lateralOffsets || line.length === 0) return line;
+  return line.map((p, i) => {
+    const prev = line[Math.max(0, i - 1)];
+    const next = line[Math.min(line.length - 1, i + 1)];
+    const len = Math.hypot(next.x - prev.x, next.y - prev.y) || 1;
+    const nx = -(next.y - prev.y) / len;
+    const ny = (next.x - prev.x) / len;
+    const offset = lateralOffsets[i] ?? 0;
+    return { ...p, x: p.x + nx * offset, y: p.y + ny * offset };
+  });
+}
+
+function carPose(line: RacingLineSample[], index: number, alpha: number) {
+  const n = line.length;
+  if (n === 0 || index < 0) return null;
+  const i = Math.min(index, n - 1);
+  const nextI = Math.min(i + 1, n - 1);
+  const prevI = Math.max(i - 1, 0);
+  const p = line[i];
+  const q = line[nextI];
+  const prev = line[prevI];
+  const next = line[Math.min(i + 1, n - 1)];
+  const x = q ? lerp(p.x, q.x, alpha) : p.x;
+  const y = q ? lerp(p.y, q.y, alpha) : p.y;
+  const heading = Math.atan2(next.y - prev.y, next.x - prev.x);
+  return { x, y, heading, radius: p.radius };
+}
+
 export function TrackCanvas({
   sections, committedSegments: segments, committedCentreSamples: centreSamples,
-  racingLine, useOptLine, result, selectedId,
+  racingLine, useOptLine, result, vehicle, pathDisplay, playbackLine, playbackIndex, playbackAlpha, playbackActive, selectedId,
   onDrag, onCommit, onSelect,
   hw, optOffsets, onOffsetChange,
   bgImageUrl, bgOpacity, imageRect, onImageRect,
@@ -107,6 +148,10 @@ export function TrackCanvas({
   }
 
   const activeLine = useOptLine ? racingLine : centreSamples;
+  const requestedLine: RacingLineSample[] = activeLine;
+  const driftLine: RacingLineSample[] = (result && result.lateralOffsets)
+    ? driftedPath(activeLine, result.lateralOffsets)
+    : activeLine;
   const HOVER_THRESHOLD_SQ = (vb.w * 0.015) ** 2;
 
   const sectionsRef = useRef(sections);
@@ -281,6 +326,10 @@ export function TrackCanvas({
   const invalidSet = new Set(segments.map((seg, i) => seg.invalid ? i : -1).filter(i => i >= 0));
   const u = Math.max(vb.w, vb.h);
   const circleR = u * 0.08;
+  const playbackDisplayLine = pathDisplay === "intended" ? playbackLine : driftedPath(playbackLine, result?.lateralOffsets);
+  const pose = carPose(playbackDisplayLine, playbackIndex, playbackAlpha);
+  const telemetryIndex = playbackActive ? playbackIndex : hover?.sampleIndex ?? -1;
+  const telemetryLine = playbackActive ? playbackDisplayLine : pathDisplay === "intended" ? requestedLine : driftLine;
 
   const gridLines: React.ReactNode[] = [];
   if (showGrid) {
@@ -298,7 +347,7 @@ export function TrackCanvas({
     }
   }
 
-  const si = hover?.sampleIndex ?? -1;
+  const si = telemetryIndex;
 
   return (
     <div ref={wrapRef} style={{ width: "100%", height: "100%" }}>
@@ -339,14 +388,25 @@ export function TrackCanvas({
             strokeWidth={u * 0.001} strokeDasharray={`${vb.w * 0.012} ${vb.w * 0.006}`} />
         )}
 
-        {activeLine.length > 1 && activeLine.map((s, i) => {
+        {(pathDisplay === "intended" || pathDisplay === "both" || !result) && requestedLine.length > 1 && requestedLine.map((s, i) => {
           if (i === 0) return null;
-          const prev = activeLine[i - 1];
+          const prev = requestedLine[i - 1];
           const col = result ? speedColor(speeds[i] ?? 0, minSpeed, maxSpeed) : "#3b82f6";
-          const sliding = result && ((result.slideRatios[i] ?? 0) > 0 || (result.slideRatios[i - 1] ?? 0) > 0);
-          return <line key={i} x1={prev.x} y1={prev.y} x2={s.x} y2={s.y}
-            stroke={col} strokeWidth={u * (useOptLine ? 0.004 : 0.002)} opacity={useOptLine ? 1 : 0.4}
-            strokeDasharray={sliding ? `${u * 0.012} ${u * 0.008}` : undefined} />;
+          return <line key={`req${i}`} x1={prev.x} y1={prev.y} x2={s.x} y2={s.y}
+            stroke={col} strokeWidth={u * (useOptLine ? 0.004 : 0.002)} opacity={useOptLine ? 1 : 0.45} />;
+        })}
+
+        {(pathDisplay === "drifted" || pathDisplay === "both") && result && driftLine.length > 1 && driftLine.map((s, i) => {
+          if (i === 0) return null;
+          const drifting = (result.lateralOffsets[i] ?? 0) > 0.05 || (result.lateralOffsets[i - 1] ?? 0) > 0.05 || (result.slideRatios[i] ?? 0) > 0 || (result.slideRatios[i - 1] ?? 0) > 0;
+          if (pathDisplay === "both" && !drifting) return null;
+          const prev = driftLine[i - 1];
+          const frontSlide = Math.max(result.frontSlideRatios[i] ?? 0, result.frontSlideRatios[i - 1] ?? 0);
+          const rearSlide = Math.max(result.rearSlideRatios[i] ?? 0, result.rearSlideRatios[i - 1] ?? 0);
+          const driftColor = frontSlide > rearSlide * 1.15 ? "#22d3ee" : "#facc15";
+          return <line key={`drift${i}`} x1={prev.x} y1={prev.y} x2={s.x} y2={s.y}
+            stroke={driftColor} strokeWidth={u * (useOptLine ? 0.0045 : 0.003)} opacity={0.95}
+            strokeDasharray={`${u * 0.012} ${u * 0.008}`} />;
         })}
 
         {editLineMode && racingLine.map((s, i) => {
@@ -473,8 +533,38 @@ export function TrackCanvas({
           );
         })()}
 
-        {hover && result && si >= 0 && (() => {
-          const sample = activeLine[si];
+        {pose && result && (() => {
+          const scale = Math.max(u * 0.006, 1.2);
+          const bodyL = Math.max(vehicle.wheelbase * 1.45, vehicle.wheelbase + 0.8);
+          const bodyW = Math.max(vehicle.trackWidth * 1.25, vehicle.trackWidth + 0.35);
+          const wheelL = Math.max(vehicle.wheelbase * 0.22, 0.35);
+          const wheelW = Math.max(vehicle.trackWidth * 0.12, 0.16);
+          const steerSign = pose.radius === Infinity ? 0 : Math.sign(pose.radius);
+          const steer = steerAngleForRadius(vehicle, pose.radius) * steerSign;
+          const toDeg = 180 / Math.PI;
+          const wheel = (key: string, x: number, y: number, angle = 0) => (
+            <rect key={key} x={x - wheelL / 2} y={y - wheelW / 2} width={wheelL} height={wheelW} rx={wheelW * 0.25}
+              fill="#0f172a" stroke="#e5e7eb" strokeWidth={scale * 0.12}
+              transform={`rotate(${angle * toDeg} ${x} ${y})`} />
+          );
+          return (
+            <g transform={`translate(${pose.x} ${pose.y}) rotate(${pose.heading * toDeg})`} style={{ pointerEvents: "none" }}>
+              <rect x={-bodyL / 2} y={-bodyW / 2} width={bodyL} height={bodyW} rx={bodyW * 0.18}
+                fill="#2563eb" fillOpacity={0.9} stroke="#bfdbfe" strokeWidth={scale * 0.18} />
+              <polygon points={`${bodyL / 2 + scale * 0.9},0 ${bodyL / 2 - scale * 0.7},${-bodyW * 0.32} ${bodyL / 2 - scale * 0.7},${bodyW * 0.32}`}
+                fill="#facc15" stroke="#111827" strokeWidth={scale * 0.12} />
+              <rect x={-bodyL * 0.05} y={-bodyW * 0.32} width={bodyL * 0.34} height={bodyW * 0.64} rx={bodyW * 0.12}
+                fill="#93c5fd" fillOpacity={0.7} />
+              {wheel("fl", vehicle.wheelbase / 2, -vehicle.trackWidth / 2, steer)}
+              {wheel("fr", vehicle.wheelbase / 2, vehicle.trackWidth / 2, steer)}
+              {wheel("rl", -vehicle.wheelbase / 2, -vehicle.trackWidth / 2)}
+              {wheel("rr", -vehicle.wheelbase / 2, vehicle.trackWidth / 2)}
+            </g>
+          );
+        })()}
+
+        {(playbackActive || hover) && result && si >= 0 && (() => {
+          const sample = telemetryLine[si];
           if (!sample) return null;
           const vms = speeds[si] ?? 0;
           const lonG = (lonAccels[si] ?? 0) / 9.81;
@@ -483,19 +573,23 @@ export function TrackCanvas({
           const cx = vb.minX + vb.w * 0.82;
           const cy = vb.minY + vb.h * 0.18;
           const gScale = circleR / Math.max(maxG, 1);
+          const offset = result.lateralOffsets[si] ?? 0;
+          const frontSlide = result.frontSlideRatios[si] ?? 0;
+          const rearSlide = result.rearSlideRatios[si] ?? 0;
+          const balance = frontSlide > rearSlide * 1.15 ? "understeer" : rearSlide > frontSlide * 1.15 ? "oversteer" : frontSlide > 0 || rearSlide > 0 ? "4w slide" : "grip";
           const textSize = u * 0.022;
           return (
             <g>
-              <circle cx={sample.x} cy={sample.y} r={u * 0.018} fill="none" stroke="#facc15" strokeWidth={u * 0.003} />
-              <circle cx={sample.x} cy={sample.y} r={u * 0.006} fill="#facc15" />
+              <circle cx={sample.x} cy={sample.y} r={u * 0.018} fill="none" stroke={playbackActive ? "#22c55e" : "#facc15"} strokeWidth={u * 0.003} />
+              <circle cx={sample.x} cy={sample.y} r={u * 0.006} fill={playbackActive ? "#22c55e" : "#facc15"} />
               <circle cx={cx} cy={cy} r={circleR} fill="#0f0f0f" fillOpacity={0.85} stroke="#333" strokeWidth={u * 0.002} />
               <line x1={cx - circleR} y1={cy} x2={cx + circleR} y2={cy} stroke="#2a2a2a" strokeWidth={u * 0.001} />
               <line x1={cx} y1={cy - circleR} x2={cx} y2={cy + circleR} stroke="#2a2a2a" strokeWidth={u * 0.001} />
               <circle cx={cx} cy={cy} r={circleR * 0.5} fill="none" stroke="#2a2a2a" strokeWidth={u * 0.001} strokeDasharray={`${u*0.005} ${u*0.003}`} />
-              <circle cx={cx + lonG * gScale} cy={cy - latG * gScale} r={u * 0.008} fill="#facc15" />
+              <circle cx={cx + lonG * gScale} cy={cy - latG * gScale} r={u * 0.008} fill={playbackActive ? "#22c55e" : "#facc15"} />
               <text x={cx + circleR * 0.52} y={cy + textSize * 0.4} fill="#444" fontSize={textSize * 0.7} textAnchor="middle">+lon</text>
               <text x={cx} y={cy - circleR - textSize * 0.3} fill="#444" fontSize={textSize * 0.7} textAnchor="middle">lat</text>
-              {[`${kmh.toFixed(1)} km/h`, `lon  ${lonG >= 0 ? "+" : ""}${lonG.toFixed(2)}g`, `lat  ${latG.toFixed(2)}g`, `dist ${(centreSamples[si]?.distance / 1000).toFixed(2)} km`]
+              {[`${playbackActive ? "LIVE " : ""}${kmh.toFixed(1)} km/h`, `lon  ${lonG >= 0 ? "+" : ""}${lonG.toFixed(2)}g`, `lat  ${latG.toFixed(2)}g`, `off  ${offset.toFixed(2)} m`, balance, `dist ${((sample.distance ?? 0) / 1000).toFixed(2)} km`]
                 .map((line, i) => <text key={i} x={cx} y={cy + circleR + textSize * (1.4 + i * 1.3)} fill="#e0e0e0" fontSize={textSize} textAnchor="middle" fontFamily="monospace">{line}</text>)}
             </g>
           );

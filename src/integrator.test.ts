@@ -183,4 +183,66 @@ describe("simulate", () => {
     expect(Math.min(...result.speeds)).toBeGreaterThan(0.5);
     expect(Number.isFinite(result.lapTime)).toBe(true);
   });
+
+  it("reports lateral offset and axle slide when overdriving grip", () => {
+    const slideTrack = buildTrackProfile([
+      { length: 250, radius: Infinity },
+      { length: 40, radius: 8 },
+      { length: 250, radius: Infinity },
+      { length: 40, radius: 8 },
+    ]);
+    const result = simulateDriftAwareHotLap({ ...entertainmentKart, muLat: 0.55, muLon: 0.55, tyreDragK: 0.35 }, slideTrack, new Float64Array(slideTrack.length).fill(5));
+
+    expect(result.lateralOffsets.length).toBe(slideTrack.length);
+    expect(result.frontSlideRatios.length).toBe(slideTrack.length);
+    expect(result.rearSlideRatios.length).toBe(slideTrack.length);
+    expect(Math.max(...result.lateralOffsets)).toBeGreaterThan(0);
+    expect(Math.max(...result.frontSlideRatios, ...result.rearSlideRatios)).toBeGreaterThan(0);
+  });
+
+
+  it("includes drifted path distance in sample timing", () => {
+    const slideTrack = buildTrackProfile([
+      { length: 250, radius: Infinity },
+      { length: 45, radius: 8 },
+      { length: 250, radius: Infinity },
+      { length: 45, radius: 8 },
+    ]);
+    const looseKart = { ...entertainmentKart, muLat: 0.5, muLon: 0.5, tyreDragK: 0.35 };
+    const slide = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8));
+    const grip = simulateGripTargetHotLap(looseKart, slideTrack);
+
+    expect(slide.sampleTimes.length).toBe(slideTrack.length);
+    expect(slide.sampleTimes[slide.sampleTimes.length - 1]).toBeCloseTo(slide.lapTime, 10);
+    expect(slide.lapTime).toBeGreaterThan(grip.lapTime);
+  });
+
+
+  it("makes stricter drift tolerance slower on a slide-prone lap", () => {
+    const slideTrack = buildTrackProfile([
+      { length: 250, radius: Infinity },
+      { length: 45, radius: 8 },
+      { length: 250, radius: Infinity },
+      { length: 45, radius: 8 },
+    ]);
+    const looseKart = { ...entertainmentKart, muLat: 0.5, muLon: 0.5, tyreDragK: 0.35 };
+    const strict = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8), 0.05);
+    const permissive = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8), 0.5);
+
+    expect(strict.lapTime).toBeGreaterThan(permissive.lapTime);
+  });
+
+  it("makes narrow off-track sliding slower than wide sliding", () => {
+    const slideTrack = buildTrackProfile([
+      { length: 250, radius: Infinity },
+      { length: 45, radius: 8 },
+      { length: 250, radius: Infinity },
+      { length: 45, radius: 8 },
+    ]);
+    const looseKart = { ...entertainmentKart, muLat: 0.5, muLon: 0.5, tyreDragK: 0.35 };
+    const narrow = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(0.2));
+    const wide = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8));
+
+    expect(narrow.lapTime).toBeGreaterThan(wide.lapTime);
+  });
 });

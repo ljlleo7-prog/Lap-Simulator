@@ -9,6 +9,7 @@ import {
   maxDecel,
   steerAngleForRadius,
   steeringTransitionDragForce,
+  axleLateralGripState,
 } from "./vehicle.js";
 import type { VehicleParams } from "./vehicle.js";
 
@@ -75,6 +76,16 @@ describe("drift grip helpers", () => {
     expect(driftPenaltyAccel(car, v, below, r)).toBe(0);
     expect(driftPenaltyAccel(car, v, above, r)).toBeGreaterThan(driftPenaltyAccel(car, v, staticGrip * 1.1, r));
     expect(driftAuthorityFactor(car, v, above)).toBeLessThan(driftAuthorityFactor(car, v, below));
+  });
+
+  it("distinguishes front and rear over-grip tendencies", () => {
+    const v = 18;
+    const latDemand = maxLateralAccel(car, v) * 1.8;
+    const fwd = axleLateralGripState({ ...car, drivetrainLayout: "FWD", weightDistFront: 0.65, diffLockFront: 1, diffLockRear: 0 }, v, latDemand);
+    const rwd = axleLateralGripState({ ...car, drivetrainLayout: "RWD", weightDistFront: 0.42, diffLockRear: 1, diffLockFront: 0 }, v, latDemand);
+
+    expect(fwd.frontSlideRatio).toBeGreaterThan(fwd.rearSlideRatio);
+    expect(rwd.rearSlideRatio).toBeGreaterThan(rwd.frontSlideRatio);
   });
 });
 

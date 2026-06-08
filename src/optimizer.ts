@@ -1,7 +1,9 @@
-import { simulateHotLap } from "./integrator.js";
+import { simulateGripTargetHotLap, simulateHotLap } from "./integrator.js";
 import { racingLineFromOffsets } from "./geometry.js";
 import type { TrackPoint } from "./track.js";
 import type { VehicleParams } from "./vehicle.js";
+
+export type SimMode = "grip" | "slide";
 
 // offset ∈ [-0.5, 0.5] per track sample, half-widths in metres
 export type Offsets = Float64Array;
@@ -55,9 +57,11 @@ export function lapTimeForOffsets(
   xs: Float64Array,
   ys: Float64Array,
   tangents: Float64Array,
+  simMode: SimMode = "slide",
+  driftTolerance = 0.18,
 ): number {
   const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
-  return simulateHotLap(vehicle, pts).lapTime;
+  return simMode === "grip" ? simulateGripTargetHotLap(vehicle, pts).lapTime : simulateHotLap(vehicle, pts, hw, driftTolerance).lapTime;
 }
 
 export function fitness(
@@ -67,8 +71,10 @@ export function fitness(
   xs: Float64Array,
   ys: Float64Array,
   tangents: Float64Array,
+  simMode: SimMode = "slide",
+  driftTolerance = 0.18,
 ): number {
-  return lapTimeForOffsets(offsets, vehicle, hw, xs, ys, tangents);
+  return lapTimeForOffsets(offsets, vehicle, hw, xs, ys, tangents, simMode, driftTolerance);
 }
 
 export interface GenResult {
@@ -85,11 +91,13 @@ export function runGeneration(
   ys: Float64Array,
   tangents: Float64Array,
   sigma: number,
+  simMode: SimMode = "slide",
+  driftTolerance = 0.18,
 ): { population: Offsets[]; best: Offsets; bestLapTime: number } {
   const pop = population.length;
 
   // evaluate
-  const lapTimes = population.map(o => fitness(o, vehicle, hw, xs, ys, tangents));
+  const lapTimes = population.map(o => fitness(o, vehicle, hw, xs, ys, tangents, simMode, driftTolerance));
 
   // find best
   let bestIdx = 0;
@@ -138,8 +146,10 @@ export function initAnnealing(
   ys: Float64Array,
   tangents: Float64Array,
   tempStart: number,
+  simMode: SimMode = "slide",
+  driftTolerance = 0.18,
 ): AnnealState {
-  const f = fitness(seed, vehicle, hw, xs, ys, tangents);
+  const f = fitness(seed, vehicle, hw, xs, ys, tangents, simMode, driftTolerance);
   return { current: new Float64Array(seed), currentFitness: f, best: new Float64Array(seed), bestFitness: f, temp: tempStart };
 }
 
@@ -152,9 +162,11 @@ export function runAnnealingStep(
   tangents: Float64Array,
   sigma: number,
   cooling: number,
+  simMode: SimMode = "slide",
+  driftTolerance = 0.18,
 ): AnnealState {
   const candidate = mutate(state.current, sigma);
-  const cf = fitness(candidate, vehicle, hw, xs, ys, tangents);
+  const cf = fitness(candidate, vehicle, hw, xs, ys, tangents, simMode, driftTolerance);
   const dE = cf - state.currentFitness;
   const accept = dE < 0 || Math.random() < Math.exp(-dE / Math.max(state.temp, 1e-6));
   const next = accept ? candidate : state.current;
@@ -303,6 +315,7 @@ export function runSmoothenStep(
   ys: Float64Array,
   tangents: Float64Array,
   gaussianSigma: number, // fraction of n samples, e.g. 0.04
+  _simMode: SimMode = "slide",
 ): Offsets | null {
   const n = offsets.length;
   const pts = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);

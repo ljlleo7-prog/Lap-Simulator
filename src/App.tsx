@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect, lazy, Suspense } from "react";
 import { SectionTable } from "./components/SectionTable.tsx";
 import { VehicleForm } from "./components/VehicleForm.tsx";
 import { TrackCanvas } from "./components/TrackCanvas.tsx";
@@ -11,9 +11,10 @@ import {
   racingLineFromOffsets,
 } from "./geometry.js";
 import type { CrossSection, RacingLineSample } from "./geometry.js";
+import type { TrackPoint } from "./track.js";
 import type { VehicleParams } from "./vehicle.js";
 import type { SimResult } from "./integrator.js";
-import type { Offsets } from "./optimizer.js";
+import type { Offsets, SimMode } from "./optimizer.js";
 
 const Results = lazy(() => import("./components/Results.tsx").then(m => ({ default: m.Results })));
 const OptimizerPanel = lazy(() => import("./components/OptimizerPanel.tsx").then(m => ({ default: m.OptimizerPanel })));
@@ -43,10 +44,36 @@ const DEFAULT_VEHICLE: VehicleParams = {
   ],
 };
 
+type SimLineSample = RacingLineSample;
+type PathDisplay = "intended" | "drifted" | "both";
+
+interface SimSnapshot {
+  result: SimResult;
+  lineSamples: SimLineSample[];
+  trackPoints: TrackPoint[];
+  source: "centre" | "opt";
+}
+
 function formatLapTime(t: number): string {
   const m = Math.floor(t / 60);
   const s = (t % 60).toFixed(3).padStart(6, "0");
   return m > 0 ? `${m}:${s}` : `${t.toFixed(3)}s`;
+}
+
+function playbackSample(result: SimResult, elapsed: number): { index: number; alpha: number } {
+  const times = result.sampleTimes;
+  const n = times.length;
+  if (n < 2) return { index: 0, alpha: 0 };
+  if (elapsed <= 0) return { index: 0, alpha: 0 };
+  if (elapsed >= result.lapTime) return { index: n - 1, alpha: 0 };
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= elapsed) lo = mid;
+    else hi = mid;
+  }
+  const dt = times[lo + 1] - times[lo];
+  return { index: lo, alpha: dt > 0 ? (elapsed - times[lo]) / dt : 0 };
 }
 
 // ── shared style tokens ───────────────────────────────────────────────────────
@@ -83,12 +110,21 @@ export default function App() {
   const [displaySections,   setDisplaySections]   = useState<CrossSection[]>(DEFAULT_SECTIONS);
   const [vehicle,    setVehicle]    = useState<VehicleParams>(DEFAULT_VEHICLE);
   const [result,     setResult]     = useState<SimResult | null>(null);
+  const [simSnapshot, setSimSnapshot] = useState<SimSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [useOptLine, setUseOptLine] = useState(false);
   const [optOffsets, setOptOffsets] = useState<Offsets | null>(null);
   const [carName,    setCarName]    = useState("");
   const [trackName,  setTrackName]  = useState("");
   const [showResults, setShowResults] = useState(false);
+  const [simMode, setSimMode] = useState<SimMode>("slide");
+  const [pathDisplay, setPathDisplay] = useState<PathDisplay>("both");
+  const [driftTolerance, setDriftTolerance] = useState(0.18);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackElapsed, setPlaybackElapsed] = useState(0);
+  const playbackElapsedRef = useRef(0);
+  const playbackStartRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
 
   // canvas / image state
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -122,12 +158,59 @@ export default function App() {
 
   const hasInvalid = segments.some(s => s.invalid);
 
+  const playback = simSnapshot ? playbackSample(simSnapshot.result, playbackElapsed) : { index: -1, alpha: 0 };
+  const playbackActive = isPlaying || playbackElapsed > 0;
+
+  const resetPlayback = useCallback(() => {
+    setIsPlaying(false);
+    playbackElapsedRef.current = 0;
+    setPlaybackElapsed(0);
+  }, []);
+
+  const setSnapshot = useCallback((snapshot: SimSnapshot) => {
+    setResult(snapshot.result);
+    setSimSnapshot(snapshot);
+    setShowResults(true);
+    playbackElapsedRef.current = 0;
+    setPlaybackElapsed(0);
+    setIsPlaying(false);
+  }, []);
+
+  useEffect(() => {
+    if (!isPlaying || !simSnapshot) return;
+    const snapshot = simSnapshot;
+    playbackStartRef.current = performance.now() - playbackElapsedRef.current * 1000;
+
+    function frame(now: number) {
+      const elapsed = Math.min(snapshot.result.lapTime, (now - playbackStartRef.current) / 1000);
+      playbackElapsedRef.current = elapsed;
+      setPlaybackElapsed(elapsed);
+      if (elapsed >= snapshot.result.lapTime) {
+        setIsPlaying(false);
+        rafRef.current = null;
+        return;
+      }
+      rafRef.current = requestAnimationFrame(frame);
+    }
+
+    rafRef.current = requestAnimationFrame(frame);
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
+  }, [isPlaying, simSnapshot]);
+
   async function runSim() {
     if (trackPoints.length < 2) return;
-    const { simulateHotLap } = await import("./integrator.js");
-    const r = simulateHotLap(vehicle, trackPoints);
-    setResult(r);
-    setShowResults(true);
+    const { simulateGripTargetHotLap, simulateHotLap } = await import("./integrator.js");
+    const r = simMode === "grip" ? simulateGripTargetHotLap(vehicle, trackPoints) : simulateHotLap(vehicle, trackPoints, hw, driftTolerance);
+    const lineSamples = useOptLine ? racingLine.map(s => ({ ...s })) : centreSamples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius }));
+    setSnapshot({
+      result: r,
+      lineSamples,
+      trackPoints: trackPoints.map(p => ({ ...p })),
+      source: useOptLine ? "opt" : "centre",
+    });
   }
 
   function handleImageFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -153,15 +236,42 @@ export default function App() {
     setUseOptLine(true);
     const nextLine = racingLineFromOffsets(nextOffsets, hw, centreSamples);
     const nextTrackPoints = nextLine.map(s => ({ distance: s.distance, radius: s.radius }));
-    const { simulateHotLap } = await import("./integrator.js");
-    setResult(simulateHotLap(vehicle, nextTrackPoints));
-    setShowResults(true);
-  }, [centreSamples, hw, vehicle]);
+    const { simulateGripTargetHotLap, simulateHotLap } = await import("./integrator.js");
+    const nextResult = simMode === "grip" ? simulateGripTargetHotLap(vehicle, nextTrackPoints) : simulateHotLap(vehicle, nextTrackPoints, hw, driftTolerance);
+    setSnapshot({
+      result: nextResult,
+      lineSamples: nextLine.map(s => ({ ...s })),
+      trackPoints: nextTrackPoints.map(p => ({ ...p })),
+      source: "opt",
+    });
+  }, [centreSamples, hw, vehicle, simMode, driftTolerance, setSnapshot]);
 
   const handleDragSections   = useCallback((s: CrossSection[]) => setDisplaySections(s), []);
+  const handleVehicleChange = useCallback((next: VehicleParams) => {
+    setVehicle(next);
+    setResult(null);
+    setSimSnapshot(null);
+    resetPlayback();
+  }, [resetPlayback]);
   const handleCommitSections = useCallback((s: CrossSection[]) => {
-    setDisplaySections(s); setCommittedSections(s); setOptOffsets(null); setUseOptLine(false);
-  }, []);
+    setDisplaySections(s); setCommittedSections(s); setOptOffsets(null); setUseOptLine(false); setResult(null); setSimSnapshot(null); resetPlayback();
+  }, [resetPlayback]);
+
+  const handleLineReset = useCallback(() => {
+    setOptOffsets(null);
+    setUseOptLine(false);
+    setResult(null);
+    setSimSnapshot(null);
+    resetPlayback();
+  }, [resetPlayback]);
+
+  const handleSimModeChange = useCallback((mode: SimMode) => {
+    setSimMode(mode);
+    setPathDisplay(mode === "slide" ? "both" : "intended");
+    setResult(null);
+    setSimSnapshot(null);
+    resetPlayback();
+  }, [resetPlayback]);
 
   const handleDistanceCalib = useCallback((knownMetres: number) => {
     const currentLen = trackPoints[trackPoints.length - 1]?.distance;
@@ -187,8 +297,8 @@ export default function App() {
       {/* ── Left: Car Setup ── */}
       <aside style={{ ...colStyle, borderRight: "1px solid #1e1e1e" }}>
         <SessionHeader title="Car Setup" name={carName} onName={setCarName} />
-        <VehicleForm params={vehicle} onChange={setVehicle} />
-        <CarIoPanel vehicle={vehicle} sessionName={carName} onImportVehicle={setVehicle} />
+        <VehicleForm params={vehicle} onChange={handleVehicleChange} />
+        <CarIoPanel vehicle={vehicle} sessionName={carName} onImportVehicle={handleVehicleChange} />
       </aside>
 
       {/* ── Centre: canvas + data plots ── */}
@@ -200,7 +310,13 @@ export default function App() {
             committedCentreSamples={centreSamples}
             racingLine={racingLine}
             useOptLine={useOptLine}
-            result={result}
+            result={simSnapshot?.result ?? result}
+            vehicle={vehicle}
+            pathDisplay={pathDisplay}
+            playbackLine={simSnapshot?.lineSamples ?? []}
+            playbackIndex={playback.index}
+            playbackAlpha={playback.alpha}
+            playbackActive={playbackActive}
             selectedId={selectedId}
             onDrag={handleDragSections}
             onCommit={handleCommitSections}
@@ -227,7 +343,7 @@ export default function App() {
         {result && (
           <div style={{ height: 220, borderTop: "1px solid #1e1e1e", flexShrink: 0 }}>
             <Suspense fallback={null}>
-              <Results result={result} trackPoints={trackPoints} />
+              <Results result={simSnapshot?.result ?? result} trackPoints={simSnapshot?.trackPoints ?? trackPoints} playbackIndex={playback.index} />
             </Suspense>
           </div>
         )}
@@ -281,8 +397,9 @@ export default function App() {
           <OptimizerPanel
             centreSamples={centreSamples} hw={hw}
             seed={optOffsets ?? new Float64Array(centreSamples.length)}
-            vehicle={vehicle} onBestOffsets={handleBestOffsets}
-            onLineReset={() => { setOptOffsets(null); setUseOptLine(false); setResult(null); }}
+            vehicle={vehicle} simMode={simMode} driftTolerance={driftTolerance} onBestOffsets={handleBestOffsets}
+            playbackActive={isPlaying}
+            onLineReset={handleLineReset}
           />
         </Suspense>
         <TrackIoPanel
@@ -294,6 +411,32 @@ export default function App() {
         {/* run + lap time */}
         <div style={{ padding: "12px 14px", marginTop: "auto", borderTop: "1px solid #1e1e1e" }}>
           {hasInvalid && <div style={{ color: "#ef4444", fontSize: 11, marginBottom: 6 }}>Invalid segments (shown in red).</div>}
+          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            {(["grip", "slide"] as SimMode[]).map(mode => (
+              <button key={mode} onClick={() => handleSimModeChange(mode)} style={{
+                flex: 1, padding: "5px 0", background: "none", border: `1px solid ${simMode === mode ? "#f59e0b" : "#333"}`,
+                color: simMode === mode ? "#fbbf24" : "#666", borderRadius: 4, cursor: "pointer", fontSize: 11,
+              }}>{mode === "grip" ? "Grip target" : "Slide / off-track"}</button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            {(["intended", "drifted", "both"] as PathDisplay[]).map(mode => (
+              <button key={mode} onClick={() => setPathDisplay(mode)} disabled={simMode === "grip" && mode !== "intended"} style={{
+                flex: 1, padding: "4px 0", background: "none", border: `1px solid ${pathDisplay === mode ? "#22c55e" : "#333"}`,
+                color: pathDisplay === mode ? "#86efac" : simMode === "grip" && mode !== "intended" ? "#333" : "#666",
+                borderRadius: 4, cursor: simMode === "grip" && mode !== "intended" ? "not-allowed" : "pointer", fontSize: 10,
+              }}>{mode === "intended" ? "Intended" : mode === "drifted" ? "Drifted" : "Both"}</button>
+            ))}
+          </div>
+          {simMode === "slide" && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, fontSize: 10, color: "#777" }}>
+              <span style={{ width: 70 }}>Drift tol</span>
+              <input type="range" min={0.02} max={0.6} step={0.01} value={driftTolerance}
+                onChange={e => setDriftTolerance(Number(e.target.value))}
+                style={{ flex: 1, accentColor: "#facc15" }} />
+              <span style={{ width: 42, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{Math.round(driftTolerance * 100)}%</span>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <button onClick={runSim} disabled={hasInvalid || trackPoints.length < 2} style={{
               flex: 1, padding: "8px 0", background: hasInvalid ? "#1a1a1a" : "#1d4ed8",
@@ -307,14 +450,42 @@ export default function App() {
               borderRadius: 5, cursor: optOffsets ? "pointer" : "not-allowed", fontSize: 11,
             }}>{useOptLine ? "Opt line ✓" : "Centre line"}</button>
           </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button
+              onClick={() => {
+                if (!simSnapshot) return;
+                if (playbackElapsed >= simSnapshot.result.lapTime) {
+                  playbackElapsedRef.current = 0;
+                  setPlaybackElapsed(0);
+                }
+                setIsPlaying(v => !v);
+              }}
+              disabled={!simSnapshot || hasInvalid}
+              style={{
+                flex: 1, padding: "7px 0", background: isPlaying ? "#7f1d1d" : "#14532d",
+                color: !simSnapshot || hasInvalid ? "#444" : isPlaying ? "#fca5a5" : "#86efac",
+                border: "none", borderRadius: 5, cursor: !simSnapshot || hasInvalid ? "not-allowed" : "pointer",
+                fontSize: 12, fontWeight: 700, letterSpacing: 1,
+              }}
+            >{isPlaying ? "PAUSE" : "PLAY"}</button>
+            <button onClick={resetPlayback} disabled={!simSnapshot} style={{
+              padding: "7px 12px", border: "1px solid #333", borderRadius: 5,
+              cursor: simSnapshot ? "pointer" : "not-allowed", background: "none", color: simSnapshot ? "#888" : "#333", fontSize: 12,
+            }}>RESTART</button>
+          </div>
           {result && (
-            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 8 }}>
-              <span style={{ fontSize: 24, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#60a5fa" }}>
-                {formatLapTime(result.lapTime)}
-              </span>
-              <span style={{ fontSize: 11, color: "#555", fontVariantNumeric: "tabular-nums" }}>
-                {(trackPoints[trackPoints.length - 1]?.distance / 1000).toFixed(3)} km
-              </span>
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 24, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#60a5fa" }}>
+                  {formatLapTime((simSnapshot?.result ?? result).lapTime)}
+                </span>
+                <span style={{ fontSize: 11, color: "#555", fontVariantNumeric: "tabular-nums" }}>
+                  {(() => { const pts = simSnapshot?.trackPoints ?? trackPoints; return (((pts[pts.length - 1]?.distance ?? 0) / 1000).toFixed(3)); })()} km
+                </span>
+              </div>
+              {simSnapshot && <div style={{ fontSize: 10, color: "#555", letterSpacing: 0.8, textTransform: "uppercase" }}>
+                Result: {simSnapshot.source === "opt" ? "optimized line" : "centre line"} · {formatLapTime(playbackElapsed)}
+              </div>}
             </div>
           )}
         </div>

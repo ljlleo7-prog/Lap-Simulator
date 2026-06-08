@@ -4,6 +4,7 @@ import {
   maxLonAccel,
   maxDecel,
   lateralGripState,
+  axleLateralGripState,
   driftAuthorityFactor,
   driftPenaltyAccel,
   steeringTransitionDragForce,
@@ -13,10 +14,14 @@ import { TrackPoint } from "./track.js";
 
 export interface SimResult {
   lapTime: number;        // seconds
+  sampleTimes: Float64Array; // cumulative seconds at each track point
   speeds: Float64Array;   // m/s at each track point
   lonAccels: Float64Array; // m/s² (positive = accel, negative = brake)
   latAccels: Float64Array; // m/s²
   slideRatios: Float64Array; // 0 = grip, >0 = over static lateral grip
+  lateralOffsets: Float64Array; // metres outward from requested path
+  frontSlideRatios: Float64Array;
+  rearSlideRatios: Float64Array;
 }
 
 function dx(points: TrackPoint[], i: number): number {
@@ -112,25 +117,57 @@ function lateralLimits(params: VehicleParams, points: TrackPoint[]): Float64Arra
   return v;
 }
 
-function buildResult(params: VehicleParams, points: TrackPoint[], v: Float64Array, includeSliding = false): SimResult {
+function effectiveTravelDistance(points: TrackPoint[], i: number, lateralOffsets: Float64Array): number {
+  const d = dx(points, i);
+  const r = points[i].radius;
+  const o0 = lateralOffsets[i] ?? 0;
+  const o1 = lateralOffsets[i + 1] ?? o0;
+  const offsetAvg = Math.max(0, (o0 + o1) / 2);
+  const offsetDelta = o1 - o0;
+  if (r === Infinity || r === 0) return Math.hypot(d, offsetDelta);
+  const arcScale = Math.max(0.2, (Math.abs(r) + offsetAvg) / Math.max(Math.abs(r), 0.01));
+  return Math.hypot(d * arcScale, offsetDelta);
+}
+
+function buildResult(
+  params: VehicleParams,
+  points: TrackPoint[],
+  v: Float64Array,
+  includeSliding = false,
+  lateralOffsets: Float64Array = new Float64Array(points.length),
+  frontSlideRatios: Float64Array = new Float64Array(points.length),
+  rearSlideRatios: Float64Array = new Float64Array(points.length),
+): SimResult {
   const n = points.length;
   const lonA = new Float64Array(n);
   const latA = new Float64Array(n);
+  const sampleTimes = new Float64Array(n);
   const slideRatios = new Float64Array(n);
   let lapTime = 0;
   for (let i = 0; i < n - 1; i++) {
     const d = dx(points, i);
+    const travelD = includeSliding ? effectiveTravelDistance(points, i, lateralOffsets) : d;
     const vAvg = (v[i] + v[i + 1]) / 2;
-    lapTime += d / Math.max(vAvg, 0.01);
-    lonA[i] = (v[i + 1] * v[i + 1] - v[i] * v[i]) / (2 * d);
+    lapTime += travelD / Math.max(vAvg, 0.01);
+    sampleTimes[i + 1] = lapTime;
+    lonA[i] = (v[i + 1] * v[i + 1] - v[i] * v[i]) / (2 * travelD);
     const r = points[i].radius;
     latA[i] = r === Infinity ? 0 : (v[i] * v[i]) / r;
-    slideRatios[i] = includeSliding ? lateralGripState(params, v[i], latA[i]).slideRatio : 0;
+    if (includeSliding) {
+      const state = lateralGripState(params, v[i], latA[i]);
+      const axleState = axleLateralGripState(params, v[i], latA[i]);
+      slideRatios[i] = Math.max(state.slideRatio, axleState.frontSlideRatio, axleState.rearSlideRatio);
+      frontSlideRatios[i] = Math.max(frontSlideRatios[i], axleState.frontSlideRatio);
+      rearSlideRatios[i] = Math.max(rearSlideRatios[i], axleState.rearSlideRatio);
+    }
   }
   lonA[n - 1] = lonA[n - 2];
   latA[n - 1] = latA[n - 2];
   slideRatios[n - 1] = slideRatios[n - 2];
-  return { lapTime, speeds: v, lonAccels: lonA, latAccels: latA, slideRatios };
+  frontSlideRatios[n - 1] = frontSlideRatios[n - 2];
+  rearSlideRatios[n - 1] = rearSlideRatios[n - 2];
+  lateralOffsets[n - 1] = lateralOffsets[n - 2];
+  return { lapTime, sampleTimes, speeds: v, lonAccels: lonA, latAccels: latA, slideRatios, lateralOffsets, frontSlideRatios, rearSlideRatios };
 }
 
 function solvePureLongitudinalEnvelope(
@@ -157,15 +194,50 @@ function solvePureLongitudinalEnvelope(
   return v;
 }
 
+function halfWidthAt(halfWidths: Float64Array | undefined, i: number): number {
+  const hw = halfWidths?.[i];
+  return hw && hw > 0 ? hw : Infinity;
+}
+
+function driftToleranceDistance(halfWidth: number, driftTolerance: number): number {
+  const allowance = Math.max(0, driftTolerance);
+  return Number.isFinite(halfWidth) ? Math.max(0.1, halfWidth * allowance) : Math.max(0.1, allowance * 4);
+}
+
+function slideOffsetStep(params: VehicleParams, v: number, r: number, d: number, previousOffset: number): { offset: number; frontSlide: number; rearSlide: number; slideLossScale: number } {
+  if (r === Infinity || r === 0) return { offset: previousOffset * Math.exp(-d / Math.max(v * 0.8, 1)), frontSlide: 0, rearSlide: 0, slideLossScale: 0 };
+  const aLat = latAccelAt(v, r);
+  const state = axleLateralGripState(params, v, aLat);
+  const frontExcess = state.frontKineticExcessRatio;
+  const rearExcess = state.rearKineticExcessRatio;
+  const slide = Math.max(frontExcess, rearExcess);
+  if (slide <= 0) return { offset: previousOffset * Math.exp(-d / Math.max(v * 0.8, 1)), frontSlide: state.frontSlideRatio, rearSlide: state.rearSlideRatio, slideLossScale: 0 };
+  const understeerWeight = frontExcess / Math.max(frontExcess + rearExcess, 1e-6);
+  const oversteerWeight = rearExcess / Math.max(frontExcess + rearExcess, 1e-6);
+  const response = 0.55 + understeerWeight * 0.45 + oversteerWeight * 0.25;
+  const lateralDrift = Math.min(maxLateralAccel(params, v), Math.abs(aLat)) * slide * response;
+  const dt = d / Math.max(v, 1);
+  const offset = previousOffset * Math.exp(-dt * (0.8 + oversteerWeight * 0.5)) + 0.5 * lateralDrift * dt * dt;
+  return { offset, frontSlide: state.frontSlideRatio, rearSlide: state.rearSlideRatio, slideLossScale: slide * (0.7 + understeerWeight * 0.4 + oversteerWeight * 0.2) };
+}
+
 function solveDriftAwareSpeedProfile(
   params: VehicleParams,
   points: TrackPoint[],
   v: Float64Array,
   entrySpeed: number,
   exitSpeed: number,
-): void {
+  halfWidths?: Float64Array,
+  driftTolerance = 0.18,
+): { lateralOffsets: Float64Array; frontSlideRatios: Float64Array; rearSlideRatios: Float64Array } {
   const n = points.length;
+  const lateralOffsets = new Float64Array(n);
+  const frontSlideRatios = new Float64Array(n);
+  const rearSlideRatios = new Float64Array(n);
   for (let pass = 0; pass < 4; pass++) {
+    lateralOffsets.fill(0);
+    frontSlideRatios.fill(0);
+    rearSlideRatios.fill(0);
     v[0] = Math.min(v[0], entrySpeed);
     for (let i = 0; i < n - 1; i++) {
       const r = points[i].radius;
@@ -173,11 +245,22 @@ function solveDriftAwareSpeedProfile(
       const d = dx(points, i);
       const authority = driftAuthorityFactor(params, v[i], aLat);
       const transientDrag = transientDragAccel(params, v[i], r, points[i + 1].radius, d);
-      const slideLoss = driftPenaltyAccel(params, v[i], aLat, r);
-      const driveAccel = maxLonAccel(params, v[i], aLat, r) * authority - transientDrag;
+      const slideStep = slideOffsetStep(params, v[i], r, d, lateralOffsets[i]);
+      const halfWidth = halfWidthAt(halfWidths, i + 1);
+      const toleranceDistance = driftToleranceDistance(halfWidth, driftTolerance);
+      const excessDrift = Math.max(0, slideStep.offset - toleranceDistance);
+      const excessDriftRatio = excessDrift / Math.max(toleranceDistance, 0.1);
+      const offTrackRatio = Math.max(0, slideStep.offset - halfWidth) / Math.max(halfWidth, 1);
+      const slideLoss = driftPenaltyAccel(params, v[i], aLat, r) * (0.08 + slideStep.slideLossScale * 0.25 + excessDriftRatio * excessDriftRatio * 1.2);
+      const toleranceGuardLoss = excessDriftRatio * excessDriftRatio * Math.max(maxDecel(params, v[i], 0, Infinity), 1) * 0.8;
+      const offTrackLoss = offTrackRatio * offTrackRatio * Math.max(maxDecel(params, v[i], 0, Infinity), 1) * 4;
+      const driveAccel = maxLonAccel(params, v[i], aLat, r) * authority - transientDrag - toleranceGuardLoss - offTrackLoss;
       const freeSpeed = Math.sqrt(Math.max(0, v[i] * v[i] + 2 * driveAccel * d));
       const damping = 1 + slideLoss * d / Math.max(v[i] * v[i], 1);
       const vNext = freeSpeed / damping;
+      lateralOffsets[i + 1] = slideStep.offset;
+      frontSlideRatios[i] = slideStep.frontSlide;
+      rearSlideRatios[i] = slideStep.rearSlide;
       v[i + 1] = Math.min(v[i + 1], vNext);
     }
 
@@ -189,6 +272,7 @@ function solveDriftAwareSpeedProfile(
       v[i] = Math.min(v[i], vPrev);
     }
   }
+  return { lateralOffsets, frontSlideRatios, rearSlideRatios };
 }
 
 // ── Legacy single-lap simulate (used by tests) ────────────────────────────────
@@ -272,15 +356,15 @@ export function simulateGripTargetHotLap(params: VehicleParams, points: TrackPoi
   return buildResult(params, points, vFinal);
 }
 
-export function simulateDriftAwareHotLap(params: VehicleParams, points: TrackPoint[]): SimResult {
+export function simulateDriftAwareHotLap(params: VehicleParams, points: TrackPoint[], halfWidths?: Float64Array, driftTolerance = 0.18): SimResult {
   const n = points.length;
 
   const vForm = solvePureLongitudinalEnvelope(params, points, 1, Infinity);
-  solveDriftAwareSpeedProfile(params, points, vForm, 1, Infinity);
+  solveDriftAwareSpeedProfile(params, points, vForm, 1, Infinity, halfWidths, driftTolerance);
   const entrySpeed = vForm[n - 1];
 
   const vHot = solvePureLongitudinalEnvelope(params, points, entrySpeed, Infinity);
-  solveDriftAwareSpeedProfile(params, points, vHot, entrySpeed, Infinity);
+  solveDriftAwareSpeedProfile(params, points, vHot, entrySpeed, Infinity, halfWidths, driftTolerance);
 
   const LOOK = Math.max(1, Math.min(20, Math.floor(n * 0.1)));
   const wLen = LOOK * 2 + 1;
@@ -298,11 +382,11 @@ export function simulateDriftAwareHotLap(params: VehicleParams, points: TrackPoi
   const exitSpeed = vWrap[LOOK - 1];
 
   const vFinal = solvePureLongitudinalEnvelope(params, points, entrySpeed, exitSpeed);
-  solveDriftAwareSpeedProfile(params, points, vFinal, entrySpeed, exitSpeed);
+  const slideState = solveDriftAwareSpeedProfile(params, points, vFinal, entrySpeed, exitSpeed, halfWidths, driftTolerance);
 
-  return buildResult(params, points, vFinal, true);
+  return buildResult(params, points, vFinal, true, slideState.lateralOffsets, slideState.frontSlideRatios, slideState.rearSlideRatios);
 }
 
-export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): SimResult {
-  return simulateDriftAwareHotLap(params, points);
+export function simulateHotLap(params: VehicleParams, points: TrackPoint[], halfWidths?: Float64Array, driftTolerance = 0.18): SimResult {
+  return simulateDriftAwareHotLap(params, points, halfWidths, driftTolerance);
 }

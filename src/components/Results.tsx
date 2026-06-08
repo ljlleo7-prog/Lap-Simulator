@@ -5,9 +5,9 @@ import {
 import type { SimResult } from "../integrator.js";
 import type { TrackPoint } from "../track.js";
 
-interface Props { result: SimResult; trackPoints: TrackPoint[] }
+interface Props { result: SimResult; trackPoints: TrackPoint[]; playbackIndex?: number }
 
-export function Results({ result, trackPoints }: Props) {
+export function Results({ result, trackPoints, playbackIndex = -1 }: Props) {
   const { speeds, lonAccels, latAccels } = result;
 
   const data = Array.from(speeds).map((v, i) => ({
@@ -15,9 +15,14 @@ export function Results({ result, trackPoints }: Props) {
     speed: Math.round(v * 3.6 * 10) / 10,
     lon: Math.round(lonAccels[i] / 9.81 * 100) / 100,
     lat: Math.round(latAccels[i] / 9.81 * 100) / 100,
+    offset: Math.round((result.lateralOffsets[i] ?? 0) * 100) / 100,
+    frontSlide: Math.round((result.frontSlideRatios[i] ?? 0) * 100) / 100,
+    rearSlide: Math.round((result.rearSlideRatios[i] ?? 0) * 100) / 100,
   }));
 
   const ggData = data.map(d => ({ lon: d.lon, lat: d.lat }));
+  const current = playbackIndex >= 0 ? data[Math.min(playbackIndex, data.length - 1)] : null;
+  const currentGg = current ? [{ lon: current.lon, lat: current.lat }] : [];
 
   const chartProps = {
     style: { background: "transparent" },
@@ -32,6 +37,7 @@ export function Results({ result, trackPoints }: Props) {
           <XAxis dataKey="distance" tick={tickStyle} />
           <YAxis tick={tickStyle} width={38} />
           <Tooltip contentStyle={tooltipStyle} />
+          {current && <ReferenceLine x={current.distance} stroke="#22c55e" strokeWidth={1.5} />}
           <Line type="monotone" dataKey="speed" dot={false} stroke="#3b82f6" strokeWidth={1.5} />
         </LineChart>
       </ChartBox>
@@ -43,8 +49,23 @@ export function Results({ result, trackPoints }: Props) {
           <YAxis tick={tickStyle} width={38} />
           <ReferenceLine y={0} stroke="#333" />
           <Tooltip contentStyle={tooltipStyle} />
+          {current && <ReferenceLine x={current.distance} stroke="#22c55e" strokeWidth={1.5} />}
           <Line type="monotone" dataKey="lon" name="Long. g" dot={false} stroke="#ef4444" strokeWidth={1.5} />
           <Line type="monotone" dataKey="lat" name="Lat. g" dot={false} stroke="#22c55e" strokeWidth={1.5} />
+        </LineChart>
+      </ChartBox>
+
+      <ChartBox label="Path offset (m)">
+        <LineChart data={data} {...chartProps}>
+          <CartesianGrid stroke="#1e1e1e" />
+          <XAxis dataKey="distance" tick={tickStyle} />
+          <YAxis tick={tickStyle} width={38} />
+          <ReferenceLine y={0} stroke="#333" />
+          <Tooltip contentStyle={tooltipStyle} />
+          {current && <ReferenceLine x={current.distance} stroke="#22c55e" strokeWidth={1.5} />}
+          <Line type="monotone" dataKey="offset" name="Offset m" dot={false} stroke="#f59e0b" strokeWidth={1.5} />
+          <Line type="monotone" dataKey="frontSlide" name="Front slide" dot={false} stroke="#38bdf8" strokeWidth={1} />
+          <Line type="monotone" dataKey="rearSlide" name="Rear slide" dot={false} stroke="#f97316" strokeWidth={1} />
         </LineChart>
       </ChartBox>
 
@@ -55,6 +76,7 @@ export function Results({ result, trackPoints }: Props) {
           <YAxis dataKey="lat" name="Lat. g" type="number" domain={["auto","auto"]} tick={tickStyle} width={38} />
           <Tooltip contentStyle={tooltipStyle} />
           <Scatter data={ggData} fill="#a855f7" opacity={0.5} />
+          {currentGg.length > 0 && <Scatter data={currentGg} fill="#22c55e" opacity={1} />}
         </ScatterChart>
       </ChartBox>
     </div>

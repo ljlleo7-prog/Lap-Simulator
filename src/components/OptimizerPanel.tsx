@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import type { Offsets } from "../optimizer.js";
+import { useEffect, useRef, useState } from "react";
+import type { Offsets, SimMode } from "../optimizer.js";
 import type { CentreSample } from "../geometry.js";
 import type { VehicleParams } from "../vehicle.js";
 
@@ -11,6 +11,9 @@ interface Props {
   hw: Float64Array;
   seed: Offsets;
   vehicle: VehicleParams;
+  simMode: SimMode;
+  driftTolerance: number;
+  playbackActive: boolean;
   onBestOffsets: (offsets: Offsets, lapTime: number) => void;
   onLineReset: () => void;
 }
@@ -30,7 +33,7 @@ function fmt(t: number): string {
   return m > 0 ? `${m}:${s}` : `${t.toFixed(3)}s`;
 }
 
-export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets, onLineReset }: Props) {
+export function OptimizerPanel({ centreSamples, hw, seed, vehicle, simMode, driftTolerance, playbackActive, onBestOffsets, onLineReset }: Props) {
   const [model, setModel] = useState<Model>("geometric");
   const [popSize, setPopSize] = useState(20);
   const [sigma, setSigma] = useState(0.08);
@@ -45,6 +48,7 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
   const [smoothAcceptMargin, setSmoothAcceptMargin] = useState(0.05);
   const [batchSize, setBatchSize] = useState(10);
   const [batchProgress, setBatchProgress] = useState(0);
+  const suspendedModeRef = useRef<Mode | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const seedRef = useRef<Offsets>(seed);
@@ -90,6 +94,8 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
       cooling,
       smoothSigma,
       smoothAcceptMargin,
+      simMode,
+      driftTolerance,
     });
   }
 
@@ -134,16 +140,42 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
     setSmoothRunning(false);
   }
 
+  useEffect(() => {
+    if (playbackActive) {
+      if (running) {
+        suspendedModeRef.current = "optimize";
+        stopWorker();
+        setRunning(false);
+      } else if (smoothRunning) {
+        suspendedModeRef.current = "smoothen";
+        stopWorker();
+        setSmoothRunning(false);
+      }
+      return;
+    }
+
+    const mode = suspendedModeRef.current;
+    if (!mode) return;
+    suspendedModeRef.current = null;
+    if (mode === "smoothen") {
+      setSmoothRunning(true);
+      startWorker("smoothen");
+    } else {
+      setRunning(true);
+      startWorker("optimize");
+    }
+  }, [playbackActive]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div style={{ padding: "12px 16px", borderBottom: "1px solid #222" }}>
       <div style={hdr}>Optimizer</div>
 
       <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
         {(["geometric", "genetic", "annealing"] as Model[]).map(m => (
-          <button key={m} onClick={() => switchModel(m)} disabled={running || smoothRunning} style={{
+          <button key={m} onClick={() => switchModel(m)} disabled={running || smoothRunning || playbackActive} style={{
             flex: 1, padding: "5px 0", border: `1px solid ${model === m ? "#3b82f6" : "#333"}`,
             background: "none", color: model === m ? "#60a5fa" : "#555",
-            borderRadius: 4, cursor: running || smoothRunning ? "not-allowed" : "pointer", fontSize: 11, letterSpacing: 0.5,
+            borderRadius: 4, cursor: running || smoothRunning || playbackActive ? "not-allowed" : "pointer", fontSize: 11, letterSpacing: 0.5,
           }}>
             {m === "geometric" ? "Geometric" : m === "genetic" ? "Genetic" : "Annealing"}
           </button>
@@ -153,30 +185,30 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
       {model !== "geometric" && (
         <Row label="Mutation σ">
           <input type="number" value={sigma} min={0.01} max={0.5} step={0.01}
-            onChange={e => setSigma(parseFloat(e.target.value) || 0.08)} disabled={running || smoothRunning} style={numIn} />
+            onChange={e => setSigma(parseFloat(e.target.value) || 0.08)} disabled={running || smoothRunning || playbackActive} style={numIn} />
         </Row>
       )}
 
       <Row label="Batch">
         <input type="number" value={batchSize} min={1} max={1000} step={1}
           onChange={e => setBatchSize(Math.max(1, Math.min(1000, parseInt(e.target.value) || 1)))}
-          disabled={running || smoothRunning} style={numIn} />
+          disabled={running || smoothRunning || playbackActive} style={numIn} />
       </Row>
 
       {model === "genetic" && (
         <Row label="Population">
           <input type="number" value={popSize} min={4} max={100} step={2}
-            onChange={e => setPopSize(parseInt(e.target.value) || 20)} disabled={running || smoothRunning} style={numIn} />
+            onChange={e => setPopSize(parseInt(e.target.value) || 20)} disabled={running || smoothRunning || playbackActive} style={numIn} />
         </Row>
       )}
       {model === "annealing" && (<>
         <Row label="Temp start">
           <input type="number" value={tempStart} min={0.01} max={10} step={0.1}
-            onChange={e => setTempStart(parseFloat(e.target.value) || 0.5)} disabled={running || smoothRunning} style={numIn} />
+            onChange={e => setTempStart(parseFloat(e.target.value) || 0.5)} disabled={running || smoothRunning || playbackActive} style={numIn} />
         </Row>
         <Row label="Cooling">
           <input type="number" value={cooling} min={0.9} max={0.9999} step={0.001}
-            onChange={e => setCooling(parseFloat(e.target.value) || 0.999)} disabled={running || smoothRunning} style={numIn} />
+            onChange={e => setCooling(parseFloat(e.target.value) || 0.999)} disabled={running || smoothRunning || playbackActive} style={numIn} />
         </Row>
       </>)}
 
@@ -207,14 +239,14 @@ export function OptimizerPanel({ centreSamples, hw, seed, vehicle, onBestOffsets
         <Row label="Smooth σ">
           <input type="range" min={0.01} max={0.2} step={0.005} value={smoothSigma}
             onChange={e => setSmoothSigma(parseFloat(e.target.value))}
-            disabled={running || smoothRunning}
+            disabled={running || smoothRunning || playbackActive}
             style={{ width: 80, accentColor: "#a855f7" }} />
           <span style={{ fontSize: 11, color: "#888", width: 34, textAlign: "right" }}>{smoothSigma.toFixed(3)}</span>
         </Row>
         <Row label="Worse ≤ s">
           <input type="number" value={smoothAcceptMargin} min={0} max={5} step={0.01}
             onChange={e => setSmoothAcceptMargin(Math.max(0, parseFloat(e.target.value) || 0))}
-            disabled={running || smoothRunning} style={numIn} />
+            disabled={running || smoothRunning || playbackActive} style={numIn} />
         </Row>
         <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
           <button onClick={smoothRunning ? stopSmoothen : startSmoothen} disabled={running} style={{

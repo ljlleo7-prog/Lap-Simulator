@@ -3,7 +3,7 @@ import {
   initAnnealing, runAnnealingStep,
   runGeometricPass, runLengthPass, runSmoothenStep, fitness, lapTimeForOffsets,
 } from "./optimizer.js";
-import type { Offsets, AnnealState } from "./optimizer.js";
+import type { Offsets, AnnealState, SimMode } from "./optimizer.js";
 import type { CentreSample } from "./geometry.js";
 import type { VehicleParams } from "./vehicle.js";
 
@@ -25,6 +25,8 @@ interface StartMessage {
   cooling: number;
   smoothSigma: number;
   smoothAcceptMargin: number;
+  simMode: SimMode;
+  driftTolerance: number;
 }
 
 interface StopMessage { type: "stop"; }
@@ -57,7 +59,7 @@ function sendProgress(trials: number, bestTime: number, batchDone: number, batch
 }
 
 function actualLapTime(offsets: Offsets, msg: StartMessage, xs: Float64Array, ys: Float64Array, tg: Float64Array): number {
-  return lapTimeForOffsets(offsets, msg.vehicle, msg.hw, xs, ys, tg);
+  return lapTimeForOffsets(offsets, msg.vehicle, msg.hw, xs, ys, tg, msg.simMode, msg.driftTolerance);
 }
 
 function startOptimize(msg: StartMessage) {
@@ -65,7 +67,7 @@ function startOptimize(msg: StartMessage) {
   const { xs, ys, tg } = arrays(msg.centreSamples);
   const signedK = signedCurvature(msg.centreSamples);
   let best: Offsets = new Float64Array(msg.seed);
-  let bestScore = fitness(best, msg.vehicle, msg.hw, xs, ys, tg);
+  let bestScore = fitness(best, msg.vehicle, msg.hw, xs, ys, tg, msg.simMode, msg.driftTolerance);
   let bestLapTime = actualLapTime(best, msg, xs, ys, tg);
   let trials = 0;
   let genState: { pop: ReturnType<typeof initPopulation>; best: number } | null = null;
@@ -74,7 +76,7 @@ function startOptimize(msg: StartMessage) {
   if (msg.model === "genetic") {
     genState = { pop: initPopulation(best, msg.popSize, msg.sigma), best: bestScore };
   } else if (msg.model === "annealing") {
-    annState = initAnnealing(best, msg.vehicle, msg.hw, xs, ys, tg, msg.tempStart);
+    annState = initAnnealing(best, msg.vehicle, msg.hw, xs, ys, tg, msg.tempStart, msg.simMode, msg.driftTolerance);
     bestScore = annState.bestFitness;
     bestLapTime = actualLapTime(annState.best, msg, xs, ys, tg);
   }
@@ -91,7 +93,7 @@ function startOptimize(msg: StartMessage) {
       trials++;
 
       if (msg.model === "genetic" && genState) {
-        const { population, best: candidate, bestLapTime: candidateScore } = runGeneration(genState.pop, msg.vehicle, msg.hw, xs, ys, tg, msg.sigma);
+        const { population, best: candidate, bestLapTime: candidateScore } = runGeneration(genState.pop, msg.vehicle, msg.hw, xs, ys, tg, msg.sigma, msg.simMode, msg.driftTolerance);
         genState.pop = population;
         if (candidateScore < genState.best) {
           genState.best = candidateScore;
@@ -102,7 +104,7 @@ function startOptimize(msg: StartMessage) {
           frameBestLapTime = bestLapTime;
         }
       } else if (msg.model === "annealing" && annState) {
-        annState = runAnnealingStep(annState, msg.vehicle, msg.hw, xs, ys, tg, msg.sigma, msg.cooling);
+        annState = runAnnealingStep(annState, msg.vehicle, msg.hw, xs, ys, tg, msg.sigma, msg.cooling, msg.simMode, msg.driftTolerance);
         if (annState.bestFitness < bestScore) {
           best = annState.best;
           bestScore = annState.bestFitness;
@@ -120,7 +122,7 @@ function startOptimize(msg: StartMessage) {
           const perturb = wideSearch ? 0 : 0.02 + k * 0.025;
           const raw = runGeometricPass(base, msg.vehicle, msg.hw, xs, ys, tg, signedK, perturb);
           const cand = runLengthPass(raw, signedK);
-          const score = fitness(cand, msg.vehicle, msg.hw, xs, ys, tg);
+          const score = fitness(cand, msg.vehicle, msg.hw, xs, ys, tg, msg.simMode, msg.driftTolerance);
           if (Number.isFinite(score) && score < bestCandScore) { bestCandScore = score; bestCandidate = cand; }
         }
         if (bestCandidate !== null) {
@@ -147,7 +149,7 @@ function startSmoothen(msg: StartMessage) {
   running = true;
   const { xs, ys, tg } = arrays(msg.centreSamples);
   let best: Offsets = new Float64Array(msg.seed);
-  let bestScore = fitness(best, msg.vehicle, msg.hw, xs, ys, tg);
+  let bestScore = fitness(best, msg.vehicle, msg.hw, xs, ys, tg, msg.simMode, msg.driftTolerance);
   let bestLapTime = actualLapTime(best, msg, xs, ys, tg);
   let smoothBestScore = Number.isFinite(bestScore) ? bestScore : Infinity;
   let trials = 0;
@@ -162,9 +164,9 @@ function startSmoothen(msg: StartMessage) {
 
     for (let trial = 0; trial < msg.batchSize && running; trial++) {
       trials++;
-      const candidate = runSmoothenStep(best, msg.vehicle, msg.hw, xs, ys, tg, msg.smoothSigma);
+      const candidate = runSmoothenStep(best, msg.vehicle, msg.hw, xs, ys, tg, msg.smoothSigma, msg.simMode);
       if (candidate !== null) {
-        const candidateScore = fitness(candidate, msg.vehicle, msg.hw, xs, ys, tg);
+        const candidateScore = fitness(candidate, msg.vehicle, msg.hw, xs, ys, tg, msg.simMode, msg.driftTolerance);
         const maxAcceptedScore = smoothBestScore + msg.smoothAcceptMargin;
         if (Number.isFinite(candidateScore) && candidateScore <= maxAcceptedScore) {
           best = candidate;
