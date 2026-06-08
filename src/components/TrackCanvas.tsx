@@ -343,8 +343,10 @@ export function TrackCanvas({
           if (i === 0) return null;
           const prev = activeLine[i - 1];
           const col = result ? speedColor(speeds[i] ?? 0, minSpeed, maxSpeed) : "#3b82f6";
+          const sliding = result && ((result.slideRatios[i] ?? 0) > 0 || (result.slideRatios[i - 1] ?? 0) > 0);
           return <line key={i} x1={prev.x} y1={prev.y} x2={s.x} y2={s.y}
-            stroke={col} strokeWidth={u * (useOptLine ? 0.004 : 0.002)} opacity={useOptLine ? 1 : 0.4} />;
+            stroke={col} strokeWidth={u * (useOptLine ? 0.004 : 0.002)} opacity={useOptLine ? 1 : 0.4}
+            strokeDasharray={sliding ? `${u * 0.012} ${u * 0.008}` : undefined} />;
         })}
 
         {editLineMode && racingLine.map((s, i) => {

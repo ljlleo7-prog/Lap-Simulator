@@ -15,6 +15,7 @@ export interface VehicleParams {
   liftArea: number;       // ClA m², positive = downforce
   muLat: number;          // peak lateral friction coefficient
   muLon: number;          // peak longitudinal friction coefficient
+  kineticGripRatio?: number; // sliding grip multiplier relative to static peak
   tyreDragK: number;      // lateral-slip drag coefficient (0 = none, ~0.05 typical car, ~0.2 kart)
   curveMode: CurveMode;
   powerCurve: PowerCurvePoint[];
@@ -39,7 +40,7 @@ export interface VehicleParams {
 
 const DEFAULT_PARAMS: VehicleParams = {
   mass: 700, dragArea: 0.9, liftArea: 3.0,
-  muLat: 1.8, muLon: 1.8, tyreDragK: 0.05,
+  muLat: 1.8, muLon: 1.8, kineticGripRatio: 0.8, tyreDragK: 0.05,
   curveMode: "torque", finalDrive: 8.5, wheelRadius: 0.33,
   drivetrainLayout: "RWD", brakeBias: 0.6, diffLockRear: 0, diffLockFront: 0,
   weightDistFront: 0.45, wheelbase: 2.5, trackWidth: 1.8, cgHeight: 0.35,
@@ -218,6 +219,43 @@ function peakTractionForce(p: VehicleParams, v: number): number {
 export function maxLateralAccel(raw: VehicleParams, v: number): number {
   const p = params(raw);
   return (p.muLat * totalNormalLoad(p, v)) / p.mass;
+}
+
+export interface LateralGripState {
+  demand: number;
+  staticLimit: number;
+  kineticLimit: number;
+  slideRatio: number;
+  kineticExcessRatio: number;
+}
+
+export function maxKineticLateralAccel(raw: VehicleParams, v: number): number {
+  const p = params(raw);
+  const ratio = Math.max(0.1, Math.min(1, p.kineticGripRatio ?? 0.8));
+  return maxLateralAccel(p, v) * ratio;
+}
+
+export function lateralGripState(raw: VehicleParams, v: number, latAccelDemand: number): LateralGripState {
+  const demand = Math.abs(latAccelDemand);
+  const staticLimit = maxLateralAccel(raw, v);
+  const kineticLimit = maxKineticLateralAccel(raw, v);
+  const slideRatio = Math.max(0, demand / Math.max(staticLimit, 1e-6) - 1);
+  const kineticExcessRatio = Math.max(0, demand / Math.max(kineticLimit, 1e-6) - 1);
+  return { demand, staticLimit, kineticLimit, slideRatio, kineticExcessRatio };
+}
+
+export function driftAuthorityFactor(raw: VehicleParams, v: number, latAccelDemand: number): number {
+  const state = lateralGripState(raw, v, latAccelDemand);
+  if (state.slideRatio <= 0) return 1;
+  return Math.max(0.08, 1 / (1 + 8 * state.slideRatio * state.slideRatio + 4 * state.kineticExcessRatio));
+}
+
+export function driftPenaltyAccel(raw: VehicleParams, v: number, latAccelDemand: number, r: number): number {
+  if (r === Infinity || r === 0) return 0;
+  const state = lateralGripState(raw, v, latAccelDemand);
+  if (state.slideRatio <= 0) return 0;
+  const slipSeverity = state.slideRatio + 2.5 * state.kineticExcessRatio;
+  return state.staticLimit * (0.08 * state.slideRatio + 0.28 * slipSeverity * slipSeverity);
 }
 
 // Friction circle: fraction of longitudinal grip remaining given lateral accel used.

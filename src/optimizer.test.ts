@@ -65,6 +65,8 @@ describe("offsetsToTrackPoints", () => {
       offsets[i] = Math.sin(theta * 24) * 0.08;
     }
 
+    const points = offsetsToTrackPoints(offsets, hw, xs, ys, tangents);
+    expect(fitness(offsets, vehicle, hw, xs, ys, tangents)).toBeCloseTo(simulateHotLap(vehicle, points).lapTime, 8);
     expect(fitness(offsets, vehicle, hw, xs, ys, tangents)).toBeCloseTo(lapTimeForOffsets(offsets, vehicle, hw, xs, ys, tangents), 8);
   });
 

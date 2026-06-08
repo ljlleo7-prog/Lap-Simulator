@@ -227,7 +227,7 @@ export default function App() {
         {result && (
           <div style={{ height: 220, borderTop: "1px solid #1e1e1e", flexShrink: 0 }}>
             <Suspense fallback={null}>
-              <Results result={result} />
+              <Results result={result} trackPoints={trackPoints} />
             </Suspense>
           </div>
         )}

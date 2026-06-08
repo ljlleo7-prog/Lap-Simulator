@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { simulate, simulateHotLap } from "./integrator.js";
+import { simulate, simulateHotLap, simulateGripTargetHotLap, simulateDriftAwareHotLap } from "./integrator.js";
 import { buildTrackProfile } from "./track.js";
 import type { TrackPoint } from "./track.js";
 import type { VehicleParams } from "./vehicle.js";
@@ -164,5 +164,23 @@ describe("simulate", () => {
     const result = simulateHotLap(car, ovalTrack);
     expect(result.lapTime).toBeGreaterThan(20);
     expect(result.speeds[result.speeds.length - 1]).toBeLessThan(100);
+  });
+
+  it("keeps grip-target hot laps non-sliding", () => {
+    const result = simulateGripTargetHotLap(entertainmentKart, brakingTrack);
+    expect(Math.max(...result.slideRatios)).toBe(0);
+  });
+
+  it("allows drift-aware hot laps to slide without stopping", () => {
+    const slideTrack = buildTrackProfile([
+      { length: 250, radius: Infinity },
+      { length: 40, radius: 8 },
+      { length: 250, radius: Infinity },
+      { length: 40, radius: 8 },
+    ]);
+    const result = simulateDriftAwareHotLap({ ...entertainmentKart, muLat: 0.55, muLon: 0.55, tyreDragK: 0.35 }, slideTrack);
+    expect(Math.max(...result.slideRatios)).toBeGreaterThan(0);
+    expect(Math.min(...result.speeds)).toBeGreaterThan(0.5);
+    expect(Number.isFinite(result.lapTime)).toBe(true);
   });
 });

@@ -3,6 +3,9 @@ import {
   maxLateralAccel,
   maxLonAccel,
   maxDecel,
+  lateralGripState,
+  driftAuthorityFactor,
+  driftPenaltyAccel,
   steeringTransitionDragForce,
   yawInertiaDragForce,
 } from "./vehicle.js";
@@ -13,6 +16,7 @@ export interface SimResult {
   speeds: Float64Array;   // m/s at each track point
   lonAccels: Float64Array; // m/s² (positive = accel, negative = brake)
   latAccels: Float64Array; // m/s²
+  slideRatios: Float64Array; // 0 = grip, >0 = over static lateral grip
 }
 
 function dx(points: TrackPoint[], i: number): number {
@@ -108,10 +112,11 @@ function lateralLimits(params: VehicleParams, points: TrackPoint[]): Float64Arra
   return v;
 }
 
-function buildResult(params: VehicleParams, points: TrackPoint[], v: Float64Array): SimResult {
+function buildResult(params: VehicleParams, points: TrackPoint[], v: Float64Array, includeSliding = false): SimResult {
   const n = points.length;
   const lonA = new Float64Array(n);
   const latA = new Float64Array(n);
+  const slideRatios = new Float64Array(n);
   let lapTime = 0;
   for (let i = 0; i < n - 1; i++) {
     const d = dx(points, i);
@@ -120,10 +125,70 @@ function buildResult(params: VehicleParams, points: TrackPoint[], v: Float64Arra
     lonA[i] = (v[i + 1] * v[i + 1] - v[i] * v[i]) / (2 * d);
     const r = points[i].radius;
     latA[i] = r === Infinity ? 0 : (v[i] * v[i]) / r;
+    slideRatios[i] = includeSliding ? lateralGripState(params, v[i], latA[i]).slideRatio : 0;
   }
   lonA[n - 1] = lonA[n - 2];
   latA[n - 1] = latA[n - 2];
-  return { lapTime, speeds: v, lonAccels: lonA, latAccels: latA };
+  slideRatios[n - 1] = slideRatios[n - 2];
+  return { lapTime, speeds: v, lonAccels: lonA, latAccels: latA, slideRatios };
+}
+
+function solvePureLongitudinalEnvelope(
+  params: VehicleParams,
+  points: TrackPoint[],
+  entrySpeed: number,
+  exitSpeed: number,
+): Float64Array {
+  const n = points.length;
+  const v = new Float64Array(n);
+  v.fill(Infinity);
+  v[0] = Math.min(v[0], entrySpeed);
+  for (let i = 0; i < n - 1; i++) {
+    const d = dx(points, i);
+    const aMax = maxLonAccel(params, v[i], 0, Infinity);
+    v[i + 1] = Math.min(v[i + 1], Math.sqrt(Math.max(0, v[i] * v[i] + 2 * aMax * d)));
+  }
+  v[n - 1] = Math.min(v[n - 1], exitSpeed);
+  for (let i = n - 2; i >= 0; i--) {
+    const d = dx(points, i);
+    const bMax = maxDecel(params, v[i + 1], 0, Infinity);
+    v[i] = Math.min(v[i], Math.sqrt(Math.max(0, v[i + 1] * v[i + 1] + 2 * bMax * d)));
+  }
+  return v;
+}
+
+function solveDriftAwareSpeedProfile(
+  params: VehicleParams,
+  points: TrackPoint[],
+  v: Float64Array,
+  entrySpeed: number,
+  exitSpeed: number,
+): void {
+  const n = points.length;
+  for (let pass = 0; pass < 4; pass++) {
+    v[0] = Math.min(v[0], entrySpeed);
+    for (let i = 0; i < n - 1; i++) {
+      const r = points[i].radius;
+      const aLat = latAccelAt(v[i], r);
+      const d = dx(points, i);
+      const authority = driftAuthorityFactor(params, v[i], aLat);
+      const transientDrag = transientDragAccel(params, v[i], r, points[i + 1].radius, d);
+      const slideLoss = driftPenaltyAccel(params, v[i], aLat, r);
+      const driveAccel = maxLonAccel(params, v[i], aLat, r) * authority - transientDrag;
+      const freeSpeed = Math.sqrt(Math.max(0, v[i] * v[i] + 2 * driveAccel * d));
+      const damping = 1 + slideLoss * d / Math.max(v[i] * v[i], 1);
+      const vNext = freeSpeed / damping;
+      v[i + 1] = Math.min(v[i + 1], vNext);
+    }
+
+    v[n - 1] = Math.min(v[n - 1], exitSpeed);
+    for (let i = n - 2; i >= 0; i--) {
+      const d = dx(points, i);
+      const bMax = maxDecel(params, v[i + 1], 0, Infinity);
+      const vPrev = Math.sqrt(Math.max(0, v[i + 1] * v[i + 1] + 2 * bMax * d));
+      v[i] = Math.min(v[i], vPrev);
+    }
+  }
 }
 
 // ── Legacy single-lap simulate (used by tests) ────────────────────────────────
@@ -140,7 +205,7 @@ export function simulate(params: VehicleParams, points: TrackPoint[]): SimResult
 // 2. Hot lap: use that entry speed + a wrap-around exit constraint so the car
 //    cannot carry speed into the finish that it couldn't scrub before turn 1.
 
-export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): SimResult {
+export function simulateGripTargetHotLap(params: VehicleParams, points: TrackPoint[]): SimResult {
   const n = points.length;
 
   // ── Formation lap: start from rest, find speed at end ────────────────────
@@ -205,4 +270,39 @@ export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): Sim
   solveSpeedProfile(params, points, vFinal, entrySpeed, exitSpeed);
 
   return buildResult(params, points, vFinal);
+}
+
+export function simulateDriftAwareHotLap(params: VehicleParams, points: TrackPoint[]): SimResult {
+  const n = points.length;
+
+  const vForm = solvePureLongitudinalEnvelope(params, points, 1, Infinity);
+  solveDriftAwareSpeedProfile(params, points, vForm, 1, Infinity);
+  const entrySpeed = vForm[n - 1];
+
+  const vHot = solvePureLongitudinalEnvelope(params, points, entrySpeed, Infinity);
+  solveDriftAwareSpeedProfile(params, points, vHot, entrySpeed, Infinity);
+
+  const LOOK = Math.max(1, Math.min(20, Math.floor(n * 0.1)));
+  const wLen = LOOK * 2 + 1;
+  const wPts: TrackPoint[] = [];
+  let wDist = 0;
+  for (let k = -LOOK; k <= LOOK; k++) {
+    const idx = ((k % n) + n) % n;
+    if (k > -LOOK) wDist += wrappedDx(points, idx - 1);
+    wPts.push({ distance: wDist, radius: points[idx].radius });
+  }
+
+  const startIdx = (((-LOOK) % n) + n) % n;
+  const vWrap = solvePureLongitudinalEnvelope(params, wPts, vHot[startIdx], Infinity);
+  solveDriftAwareSpeedProfile(params, wPts, vWrap, vHot[startIdx], Infinity);
+  const exitSpeed = vWrap[LOOK - 1];
+
+  const vFinal = solvePureLongitudinalEnvelope(params, points, entrySpeed, exitSpeed);
+  solveDriftAwareSpeedProfile(params, points, vFinal, entrySpeed, exitSpeed);
+
+  return buildResult(params, points, vFinal, true);
+}
+
+export function simulateHotLap(params: VehicleParams, points: TrackPoint[]): SimResult {
+  return simulateDriftAwareHotLap(params, points);
 }

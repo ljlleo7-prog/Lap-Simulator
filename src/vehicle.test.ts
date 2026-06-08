@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { maxLateralAccel, maxLonAccel, maxDecel, steerAngleForRadius, steeringTransitionDragForce } from "./vehicle.js";
+import {
+  maxLateralAccel,
+  maxKineticLateralAccel,
+  lateralGripState,
+  driftPenaltyAccel,
+  driftAuthorityFactor,
+  maxLonAccel,
+  maxDecel,
+  steerAngleForRadius,
+  steeringTransitionDragForce,
+} from "./vehicle.js";
 import type { VehicleParams } from "./vehicle.js";
 
 const car: VehicleParams = {
@@ -39,6 +49,32 @@ describe("maxLateralAccel", () => {
 
   it("is positive at rest", () => {
     expect(maxLateralAccel(car, 0)).toBeGreaterThan(0);
+  });
+});
+
+describe("drift grip helpers", () => {
+  it("defaults kinetic lateral grip to 80 percent of static grip", () => {
+    const v = 20;
+    expect(maxKineticLateralAccel(car, v)).toBeCloseTo(maxLateralAccel(car, v) * 0.8, 10);
+  });
+
+  it("reports slide ratio only beyond static grip", () => {
+    const v = 20;
+    const staticGrip = maxLateralAccel(car, v);
+    expect(lateralGripState(car, v, staticGrip * 0.95).slideRatio).toBe(0);
+    expect(lateralGripState(car, v, staticGrip * 1.2).slideRatio).toBeGreaterThan(0);
+  });
+
+  it("adds rigid slide loss and reduces authority above static grip", () => {
+    const v = 20;
+    const r = 12;
+    const staticGrip = maxLateralAccel(car, v);
+    const below = staticGrip * 0.95;
+    const above = staticGrip * 1.35;
+
+    expect(driftPenaltyAccel(car, v, below, r)).toBe(0);
+    expect(driftPenaltyAccel(car, v, above, r)).toBeGreaterThan(driftPenaltyAccel(car, v, staticGrip * 1.1, r));
+    expect(driftAuthorityFactor(car, v, above)).toBeLessThan(driftAuthorityFactor(car, v, below));
   });
 });
 

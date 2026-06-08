@@ -3,14 +3,15 @@ import {
   ScatterChart, Scatter, ReferenceLine,
 } from "recharts";
 import type { SimResult } from "../integrator.js";
+import type { TrackPoint } from "../track.js";
 
-interface Props { result: SimResult }
+interface Props { result: SimResult; trackPoints: TrackPoint[] }
 
-export function Results({ result }: Props) {
+export function Results({ result, trackPoints }: Props) {
   const { speeds, lonAccels, latAccels } = result;
 
   const data = Array.from(speeds).map((v, i) => ({
-    i,
+    distance: Math.round((trackPoints[i]?.distance ?? i) * 10) / 10,
     speed: Math.round(v * 3.6 * 10) / 10,
     lon: Math.round(lonAccels[i] / 9.81 * 100) / 100,
     lat: Math.round(latAccels[i] / 9.81 * 100) / 100,
@@ -28,21 +29,22 @@ export function Results({ result }: Props) {
       <ChartBox label="Speed (km/h)">
         <LineChart data={data} {...chartProps}>
           <CartesianGrid stroke="#1e1e1e" />
-          <XAxis dataKey="i" tick={tickStyle} />
+          <XAxis dataKey="distance" tick={tickStyle} />
           <YAxis tick={tickStyle} width={38} />
           <Tooltip contentStyle={tooltipStyle} />
           <Line type="monotone" dataKey="speed" dot={false} stroke="#3b82f6" strokeWidth={1.5} />
         </LineChart>
       </ChartBox>
 
-      <ChartBox label="Long. g">
+      <ChartBox label="Long. / Lat. g">
         <LineChart data={data} {...chartProps}>
           <CartesianGrid stroke="#1e1e1e" />
-          <XAxis dataKey="i" tick={tickStyle} />
+          <XAxis dataKey="distance" tick={tickStyle} />
           <YAxis tick={tickStyle} width={38} />
           <ReferenceLine y={0} stroke="#333" />
           <Tooltip contentStyle={tooltipStyle} />
-          <Line type="monotone" dataKey="lon" dot={false} stroke="#ef4444" strokeWidth={1.5} />
+          <Line type="monotone" dataKey="lon" name="Long. g" dot={false} stroke="#ef4444" strokeWidth={1.5} />
+          <Line type="monotone" dataKey="lat" name="Lat. g" dot={false} stroke="#22c55e" strokeWidth={1.5} />
         </LineChart>
       </ChartBox>
 
