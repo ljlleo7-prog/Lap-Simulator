@@ -47,7 +47,7 @@ export function offsetsToTrackPoints(
   tangents: Float64Array, // tangentAngle per sample
 ): TrackPoint[] {
   const samples = Array.from(offsets, (_, i) => ({ x: xs[i], y: ys[i], tangentAngle: tangents[i] }));
-  return racingLineFromOffsets(offsets, hw, samples).map(s => ({ distance: s.distance, radius: s.radius }));
+  return racingLineFromOffsets(offsets, hw, samples).map((s, i) => ({ distance: s.distance, radius: s.radius, x: s.x, y: s.y, tangentAngle: s.tangentAngle, halfWidth: hw[i] }));
 }
 
 export function lapTimeForOffsets(

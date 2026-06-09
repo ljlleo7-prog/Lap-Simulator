@@ -19,9 +19,13 @@ export interface SimResult {
   lonAccels: Float64Array; // m/s² (positive = accel, negative = brake)
   latAccels: Float64Array; // m/s²
   slideRatios: Float64Array; // 0 = grip, >0 = over static lateral grip
-  lateralOffsets: Float64Array; // metres outward from requested path
+  lateralOffsets: Float64Array; // signed metres from requested path
   frontSlideRatios: Float64Array;
   rearSlideRatios: Float64Array;
+  actualXs?: Float64Array;
+  actualYs?: Float64Array;
+  actualHeadings?: Float64Array;
+  actualDistances?: Float64Array;
 }
 
 function dx(points: TrackPoint[], i: number): number {
@@ -117,6 +121,38 @@ function lateralLimits(params: VehicleParams, points: TrackPoint[]): Float64Arra
   return v;
 }
 
+// Tolerance-aware corner speed for slide mode.
+// driftTolerance ∈ [0,1]: fraction of half-width the car is allowed to drift.
+// 0 → grip-mode speed limit; 1 → full half-width is free drift zone, no extra cap.
+// For intermediate values the allowed lateral acceleration scales as:
+//   aLat_max_slide = aLat_max_grip + (aLat_max_full_track - aLat_max_grip) * tolerance
+// where aLat_max_full_track ≈ v² / r, limited by total available grip.
+function cornerSpeedLimitSlide(params: VehicleParams, radius: number, driftTolerance: number): number {
+  if (radius === Infinity) return Infinity;
+  const r = Math.abs(radius);
+  const utilization = lateralGripUtilization(params);
+  // At tolerance 0: same grip-mode limit (car must stay on line).
+  // At tolerance 1: allow mild over-grip so permissive mode can still drift.
+  const maxUtil = 1.25;
+  const effectiveUtil = utilization + (maxUtil - utilization) * driftTolerance;
+  let lo = 0;
+  let hi = 120;
+  for (let i = 0; i < 8 && latAccelAt(hi, r) <= maxLateralAccel(params, hi) * effectiveUtil; i++) hi *= 1.5;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (latAccelAt(mid, r) <= maxLateralAccel(params, mid) * effectiveUtil) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function lateralLimitsSlide(params: VehicleParams, points: TrackPoint[], driftTolerance: number): Float64Array {
+  const n = points.length;
+  const v = new Float64Array(n);
+  for (let i = 0; i < n; i++) v[i] = cornerSpeedLimitSlide(params, points[i].radius, driftTolerance);
+  return v;
+}
+
 function effectiveTravelDistance(points: TrackPoint[], i: number, lateralOffsets: Float64Array): number {
   const d = dx(points, i);
   const r = points[i].radius;
@@ -137,6 +173,12 @@ function buildResult(
   lateralOffsets: Float64Array = new Float64Array(points.length),
   frontSlideRatios: Float64Array = new Float64Array(points.length),
   rearSlideRatios: Float64Array = new Float64Array(points.length),
+  actualXs?: Float64Array,
+  actualYs?: Float64Array,
+  actualHeadings?: Float64Array,
+  actualDistances?: Float64Array,
+  actualLatAccels?: Float64Array,
+  actualSegmentDistances?: Float64Array,
 ): SimResult {
   const n = points.length;
   const lonA = new Float64Array(n);
@@ -146,13 +188,13 @@ function buildResult(
   let lapTime = 0;
   for (let i = 0; i < n - 1; i++) {
     const d = dx(points, i);
-    const travelD = includeSliding ? effectiveTravelDistance(points, i, lateralOffsets) : d;
+    const travelD = actualSegmentDistances?.[i] ?? (includeSliding ? effectiveTravelDistance(points, i, lateralOffsets) : d);
     const vAvg = (v[i] + v[i + 1]) / 2;
     lapTime += travelD / Math.max(vAvg, 0.01);
     sampleTimes[i + 1] = lapTime;
     lonA[i] = (v[i + 1] * v[i + 1] - v[i] * v[i]) / (2 * travelD);
     const r = points[i].radius;
-    latA[i] = r === Infinity ? 0 : (v[i] * v[i]) / r;
+    latA[i] = actualLatAccels?.[i] ?? (r === Infinity ? 0 : (v[i] * v[i]) / r);
     if (includeSliding) {
       const state = lateralGripState(params, v[i], latA[i]);
       const axleState = axleLateralGripState(params, v[i], latA[i]);
@@ -167,7 +209,7 @@ function buildResult(
   frontSlideRatios[n - 1] = frontSlideRatios[n - 2];
   rearSlideRatios[n - 1] = rearSlideRatios[n - 2];
   lateralOffsets[n - 1] = lateralOffsets[n - 2];
-  return { lapTime, sampleTimes, speeds: v, lonAccels: lonA, latAccels: latA, slideRatios, lateralOffsets, frontSlideRatios, rearSlideRatios };
+  return { lapTime, sampleTimes, speeds: v, lonAccels: lonA, latAccels: latA, slideRatios, lateralOffsets, frontSlideRatios, rearSlideRatios, actualXs, actualYs, actualHeadings, actualDistances };
 }
 
 function solvePureLongitudinalEnvelope(
@@ -221,7 +263,62 @@ function slideOffsetStep(params: VehicleParams, v: number, r: number, d: number,
   return { offset, frontSlide: state.frontSlideRatio, rearSlide: state.rearSlideRatio, slideLossScale: slide * (0.7 + understeerWeight * 0.4 + oversteerWeight * 0.2) };
 }
 
-function solveDriftAwareSpeedProfile(
+function angleNorm(a: number): number {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  return a;
+}
+
+function pointHalfWidth(points: TrackPoint[], halfWidths: Float64Array | undefined, i: number): number {
+  const hw = points[i]?.halfWidth ?? halfWidths?.[i];
+  return hw && hw > 0 ? hw : Infinity;
+}
+
+interface ResolvedPath {
+  x: Float64Array;
+  y: Float64Array;
+  heading: Float64Array;
+}
+
+function resolvePathGeometry(points: TrackPoint[]): ResolvedPath {
+  const n = points.length;
+  const x = new Float64Array(n);
+  const y = new Float64Array(n);
+  const heading = new Float64Array(n);
+  if (points.every(p => p.x !== undefined && p.y !== undefined && p.tangentAngle !== undefined)) {
+    for (let i = 0; i < n; i++) {
+      x[i] = points[i].x!;
+      y[i] = points[i].y!;
+      heading[i] = points[i].tangentAngle!;
+    }
+    return { x, y, heading };
+  }
+
+  heading[0] = points[0]?.tangentAngle ?? 0;
+  for (let i = 0; i < n - 1; i++) {
+    const d = dx(points, i);
+    const k = signedCurvature(points[i].radius);
+    const hMid = heading[i] + k * d * 0.5;
+    x[i + 1] = x[i] + Math.cos(hMid) * d;
+    y[i + 1] = y[i] + Math.sin(hMid) * d;
+    heading[i + 1] = angleNorm(heading[i] + k * d);
+  }
+  return { x, y, heading };
+}
+
+interface CoordinateSlideState {
+  lateralOffsets: Float64Array;
+  frontSlideRatios: Float64Array;
+  rearSlideRatios: Float64Array;
+  actualXs: Float64Array;
+  actualYs: Float64Array;
+  actualHeadings: Float64Array;
+  actualDistances: Float64Array;
+  actualLatAccels: Float64Array;
+  actualSegmentDistances: Float64Array;
+}
+
+function solveCoordinateSlideProfile(
   params: VehicleParams,
   points: TrackPoint[],
   v: Float64Array,
@@ -229,50 +326,109 @@ function solveDriftAwareSpeedProfile(
   exitSpeed: number,
   halfWidths?: Float64Array,
   driftTolerance = 0.18,
-): { lateralOffsets: Float64Array; frontSlideRatios: Float64Array; rearSlideRatios: Float64Array } {
+): CoordinateSlideState {
   const n = points.length;
+  const ref = resolvePathGeometry(points);
   const lateralOffsets = new Float64Array(n);
   const frontSlideRatios = new Float64Array(n);
   const rearSlideRatios = new Float64Array(n);
-  for (let pass = 0; pass < 4; pass++) {
-    lateralOffsets.fill(0);
-    frontSlideRatios.fill(0);
-    rearSlideRatios.fill(0);
-    v[0] = Math.min(v[0], entrySpeed);
-    for (let i = 0; i < n - 1; i++) {
-      const r = points[i].radius;
-      const aLat = latAccelAt(v[i], r);
-      const d = dx(points, i);
-      const authority = driftAuthorityFactor(params, v[i], aLat);
-      const transientDrag = transientDragAccel(params, v[i], r, points[i + 1].radius, d);
-      const slideStep = slideOffsetStep(params, v[i], r, d, lateralOffsets[i]);
-      const halfWidth = halfWidthAt(halfWidths, i + 1);
-      const toleranceDistance = driftToleranceDistance(halfWidth, driftTolerance);
-      const excessDrift = Math.max(0, slideStep.offset - toleranceDistance);
-      const excessDriftRatio = excessDrift / Math.max(toleranceDistance, 0.1);
-      const offTrackRatio = Math.max(0, slideStep.offset - halfWidth) / Math.max(halfWidth, 1);
-      const slideLoss = driftPenaltyAccel(params, v[i], aLat, r) * (0.08 + slideStep.slideLossScale * 0.25 + excessDriftRatio * excessDriftRatio * 1.2);
-      const toleranceGuardLoss = excessDriftRatio * excessDriftRatio * Math.max(maxDecel(params, v[i], 0, Infinity), 1) * 0.8;
-      const offTrackLoss = offTrackRatio * offTrackRatio * Math.max(maxDecel(params, v[i], 0, Infinity), 1) * 4;
-      const driveAccel = maxLonAccel(params, v[i], aLat, r) * authority - transientDrag - toleranceGuardLoss - offTrackLoss;
-      const freeSpeed = Math.sqrt(Math.max(0, v[i] * v[i] + 2 * driveAccel * d));
-      const damping = 1 + slideLoss * d / Math.max(v[i] * v[i], 1);
-      const vNext = freeSpeed / damping;
-      lateralOffsets[i + 1] = slideStep.offset;
-      frontSlideRatios[i] = slideStep.frontSlide;
-      rearSlideRatios[i] = slideStep.rearSlide;
-      v[i + 1] = Math.min(v[i + 1], vNext);
-    }
+  const actualXs = new Float64Array(n);
+  const actualYs = new Float64Array(n);
+  const actualHeadings = new Float64Array(n);
+  const actualDistances = new Float64Array(n);
+  const actualLatAccels = new Float64Array(n);
+  const actualSegmentDistances = new Float64Array(n);
 
-    v[n - 1] = Math.min(v[n - 1], exitSpeed);
-    for (let i = n - 2; i >= 0; i--) {
-      const d = dx(points, i);
-      const bMax = maxDecel(params, v[i + 1], 0, Infinity);
-      const vPrev = Math.sqrt(Math.max(0, v[i + 1] * v[i + 1] + 2 * bMax * d));
-      v[i] = Math.min(v[i], vPrev);
+  let x = ref.x[0];
+  let y = ref.y[0];
+  let heading = ref.heading[0];
+  actualXs[0] = x;
+  actualYs[0] = y;
+  actualHeadings[0] = heading;
+
+  v[0] = Math.min(v[0], entrySpeed);
+  for (let i = 0; i < n - 1; i++) {
+    const dRef = Math.max(dx(points, i), 0.01);
+    const v0 = Math.max(v[i], 0.5);
+    const refHeading = ref.heading[i];
+    const refNextHeading = ref.heading[i + 1];
+    const refK = signedCurvature(points[i].radius);
+    const nx = -Math.sin(refHeading);
+    const ny = Math.cos(refHeading);
+    const crossTrack = (x - ref.x[i]) * nx + (y - ref.y[i]) * ny;
+    const headingError = angleNorm(heading - refHeading);
+    const halfWidth = pointHalfWidth(points, halfWidths, i);
+    const toleranceDistance = driftToleranceDistance(halfWidth, driftTolerance);
+    const correctionK = Math.max(-0.08, Math.min(0.08, -crossTrack * 0.025 - headingError * 0.22));
+    const demandK = refK + correctionK;
+    const demandLat = v0 * v0 * demandK;
+    const axleState = axleLateralGripState(params, v0, demandLat);
+    const gripState = lateralGripState(params, v0, demandLat);
+    const frontExcess = axleState.frontKineticExcessRatio;
+    const rearExcess = axleState.rearKineticExcessRatio;
+    const maxLat = maxLateralAccel(params, v0);
+    const understeer = frontExcess > rearExcess * 1.05;
+    const oversteer = rearExcess > frontExcess * 1.05;
+    let actualLat = Math.max(-maxLat, Math.min(maxLat, demandLat));
+    if (gripState.kineticExcessRatio > 0) {
+      const kineticLat = maxLat / (1 + gripState.kineticExcessRatio * 0.9);
+      actualLat = Math.max(-kineticLat, Math.min(kineticLat, demandLat));
+      if (understeer) actualLat *= 0.78;
+      if (oversteer) actualLat += Math.sign(demandLat || refK || 1) * maxLat * Math.min(rearExcess, 1.5) * 0.18;
     }
+    const actualK = actualLat / Math.max(v0 * v0, 0.25);
+    const dt = dRef / v0;
+    const nextHeading = angleNorm(heading + actualK * dRef);
+    const hMid = heading + angleNorm(nextHeading - heading) * 0.5;
+    const xNext = x + Math.cos(hMid) * dRef;
+    const yNext = y + Math.sin(hMid) * dRef;
+    const travelD = Math.max(0.01, Math.hypot(xNext - x, yNext - y));
+    const nextNx = -Math.sin(refNextHeading);
+    const nextNy = Math.cos(refNextHeading);
+    const nextCrossTrack = (xNext - ref.x[i + 1]) * nextNx + (yNext - ref.y[i + 1]) * nextNy;
+    const offTrackRatio = Math.max(0, Math.abs(nextCrossTrack) - halfWidth) / Math.max(halfWidth, 1);
+    // Guard loss only applies when car is actually off-track or when the next segment
+    // demands grip that cross-track recovery will consume. Pure on-track offset on a
+    // straight causes no braking — the steering correction handles recovery.
+    const excessDrift = Math.max(0, Math.abs(nextCrossTrack) - toleranceDistance);
+    const excessDriftRatio = offTrackRatio > 0
+      ? 0  // handled by offTrackRatio already
+      : excessDrift / Math.max(toleranceDistance + halfWidth * 0.5, 0.1);
+    const nextRefK = Math.abs(signedCurvature(points[Math.min(i + 1, n - 1)].radius));
+    const cornering = nextRefK > 0.005; // next segment has meaningful curvature
+    const scrubLoss = driftPenaltyAccel(params, v0, demandLat, points[i].radius) * Math.min(0.35, 0.08 + gripState.kineticExcessRatio * 0.08);
+    const guardLoss = cornering
+      ? excessDriftRatio * excessDriftRatio * 0.4 * Math.max(maxDecel(params, v0, Math.abs(actualLat), points[i].radius), 1)
+      : 0;
+    const offTrackLoss = offTrackRatio * offTrackRatio * 3.5 * Math.max(maxDecel(params, v0, Math.abs(actualLat), points[i].radius), 1);
+    const transientDrag = transientDragAccel(params, v0, points[i].radius, points[i + 1].radius, dRef);
+    const driveAccel = maxLonAccel(params, v0, Math.abs(actualLat), points[i].radius) - transientDrag - scrubLoss - guardLoss - offTrackLoss;
+    // Speed floor: never brake to zero due to offset alone; off-track is the only hard limiter.
+    const vFloor = offTrackRatio > 0 ? 0.36 : Math.max(0.36, v0 * 0.5);
+    const vNext = Math.sqrt(Math.max(vFloor * vFloor, v0 * v0 + 2 * driveAccel * travelD));
+
+    v[i + 1] = Math.min(v[i + 1], vNext);
+    lateralOffsets[i] = crossTrack;
+    lateralOffsets[i + 1] = nextCrossTrack;
+    frontSlideRatios[i] = axleState.frontSlideRatio;
+    rearSlideRatios[i] = axleState.rearSlideRatio;
+    actualLatAccels[i] = actualLat;
+    actualSegmentDistances[i] = travelD;
+    actualDistances[i + 1] = actualDistances[i] + travelD;
+    actualXs[i + 1] = xNext;
+    actualYs[i + 1] = yNext;
+    actualHeadings[i + 1] = nextHeading;
+    x = xNext;
+    y = yNext;
+    heading = nextHeading;
   }
-  return { lateralOffsets, frontSlideRatios, rearSlideRatios };
+
+  v[n - 1] = Math.min(v[n - 1], exitSpeed);
+  actualLatAccels[n - 1] = actualLatAccels[n - 2] ?? 0;
+  frontSlideRatios[n - 1] = frontSlideRatios[n - 2] ?? 0;
+  rearSlideRatios[n - 1] = rearSlideRatios[n - 2] ?? 0;
+  actualSegmentDistances[n - 1] = actualSegmentDistances[n - 2] ?? 0;
+  return { lateralOffsets, frontSlideRatios, rearSlideRatios, actualXs, actualYs, actualHeadings, actualDistances, actualLatAccels, actualSegmentDistances };
 }
 
 // ── Legacy single-lap simulate (used by tests) ────────────────────────────────
@@ -359,12 +515,14 @@ export function simulateGripTargetHotLap(params: VehicleParams, points: TrackPoi
 export function simulateDriftAwareHotLap(params: VehicleParams, points: TrackPoint[], halfWidths?: Float64Array, driftTolerance = 0.18): SimResult {
   const n = points.length;
 
-  const vForm = solvePureLongitudinalEnvelope(params, points, 1, Infinity);
-  solveDriftAwareSpeedProfile(params, points, vForm, 1, Infinity, halfWidths, driftTolerance);
+  const vForm = lateralLimitsSlide(params, points, driftTolerance);
+  solveSpeedProfile(params, points, vForm, 1, Infinity);
+  solveCoordinateSlideProfile(params, points, vForm, 1, Infinity, halfWidths, driftTolerance);
   const entrySpeed = vForm[n - 1];
 
-  const vHot = solvePureLongitudinalEnvelope(params, points, entrySpeed, Infinity);
-  solveDriftAwareSpeedProfile(params, points, vHot, entrySpeed, Infinity, halfWidths, driftTolerance);
+  const vHot = lateralLimitsSlide(params, points, driftTolerance);
+  solveSpeedProfile(params, points, vHot, entrySpeed, Infinity);
+  solveCoordinateSlideProfile(params, points, vHot, entrySpeed, Infinity, halfWidths, driftTolerance);
 
   const LOOK = Math.max(1, Math.min(20, Math.floor(n * 0.1)));
   const wLen = LOOK * 2 + 1;
@@ -377,14 +535,31 @@ export function simulateDriftAwareHotLap(params: VehicleParams, points: TrackPoi
   }
 
   const startIdx = (((-LOOK) % n) + n) % n;
-  const vWrap = solvePureLongitudinalEnvelope(params, wPts, vHot[startIdx], Infinity);
-  solveDriftAwareSpeedProfile(params, wPts, vWrap, vHot[startIdx], Infinity);
+  const vWrap = lateralLimitsSlide(params, wPts, driftTolerance);
+  vWrap[0] = Math.min(vWrap[0], vHot[startIdx]);
+  solveSpeedProfile(params, wPts, vWrap, vHot[startIdx], Infinity);
+  solveCoordinateSlideProfile(params, wPts, vWrap, vHot[startIdx], Infinity, undefined, driftTolerance);
   const exitSpeed = vWrap[LOOK - 1];
 
-  const vFinal = solvePureLongitudinalEnvelope(params, points, entrySpeed, exitSpeed);
-  const slideState = solveDriftAwareSpeedProfile(params, points, vFinal, entrySpeed, exitSpeed, halfWidths, driftTolerance);
+  const vFinal = lateralLimitsSlide(params, points, driftTolerance);
+  solveSpeedProfile(params, points, vFinal, entrySpeed, exitSpeed);
+  const slideState = solveCoordinateSlideProfile(params, points, vFinal, entrySpeed, exitSpeed, halfWidths, driftTolerance);
 
-  return buildResult(params, points, vFinal, true, slideState.lateralOffsets, slideState.frontSlideRatios, slideState.rearSlideRatios);
+  return buildResult(
+    params,
+    points,
+    vFinal,
+    true,
+    slideState.lateralOffsets,
+    slideState.frontSlideRatios,
+    slideState.rearSlideRatios,
+    slideState.actualXs,
+    slideState.actualYs,
+    slideState.actualHeadings,
+    slideState.actualDistances,
+    slideState.actualLatAccels,
+    slideState.actualSegmentDistances,
+  );
 }
 
 export function simulateHotLap(params: VehicleParams, points: TrackPoint[], halfWidths?: Float64Array, driftTolerance = 0.18): SimResult {

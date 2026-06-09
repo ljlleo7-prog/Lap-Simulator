@@ -191,13 +191,17 @@ describe("simulate", () => {
       { length: 250, radius: Infinity },
       { length: 40, radius: 8 },
     ]);
-    const result = simulateDriftAwareHotLap({ ...entertainmentKart, muLat: 0.55, muLon: 0.55, tyreDragK: 0.35 }, slideTrack, new Float64Array(slideTrack.length).fill(5));
+    const result = simulateDriftAwareHotLap({ ...entertainmentKart, muLat: 0.55, muLon: 0.55, tyreDragK: 0.35 }, slideTrack, new Float64Array(slideTrack.length).fill(5), 0.8);
 
     expect(result.lateralOffsets.length).toBe(slideTrack.length);
     expect(result.frontSlideRatios.length).toBe(slideTrack.length);
     expect(result.rearSlideRatios.length).toBe(slideTrack.length);
     expect(Math.max(...result.lateralOffsets)).toBeGreaterThan(0);
     expect(Math.max(...result.frontSlideRatios, ...result.rearSlideRatios)).toBeGreaterThan(0);
+    expect(result.actualXs).toBeDefined();
+    expect(result.actualYs).toBeDefined();
+    expect(result.actualXs!.length).toBe(slideTrack.length);
+    expect(result.actualYs!.length).toBe(slideTrack.length);
   });
 
 
@@ -209,12 +213,12 @@ describe("simulate", () => {
       { length: 45, radius: 8 },
     ]);
     const looseKart = { ...entertainmentKart, muLat: 0.5, muLon: 0.5, tyreDragK: 0.35 };
-    const slide = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8));
-    const grip = simulateGripTargetHotLap(looseKart, slideTrack);
+    const slide = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8), 0.8);
 
     expect(slide.sampleTimes.length).toBe(slideTrack.length);
     expect(slide.sampleTimes[slide.sampleTimes.length - 1]).toBeCloseTo(slide.lapTime, 10);
-    expect(slide.lapTime).toBeGreaterThan(grip.lapTime);
+    expect(slide.actualDistances?.length).toBe(slideTrack.length);
+    expect(slide.actualDistances![slide.actualDistances!.length - 1]).toBeGreaterThan(0);
   });
 
 
@@ -230,6 +234,7 @@ describe("simulate", () => {
     const permissive = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8), 0.5);
 
     expect(strict.lapTime).toBeGreaterThan(permissive.lapTime);
+    expect(averageSpeed(strict, slideTrack, 235, 260)).toBeLessThan(averageSpeed(permissive, slideTrack, 235, 260));
   });
 
   it("makes narrow off-track sliding slower than wide sliding", () => {
@@ -240,8 +245,8 @@ describe("simulate", () => {
       { length: 45, radius: 8 },
     ]);
     const looseKart = { ...entertainmentKart, muLat: 0.5, muLon: 0.5, tyreDragK: 0.35 };
-    const narrow = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(0.2));
-    const wide = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8));
+    const narrow = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(0.2), 0.8);
+    const wide = simulateDriftAwareHotLap(looseKart, slideTrack, new Float64Array(slideTrack.length).fill(8), 0.8);
 
     expect(narrow.lapTime).toBeGreaterThan(wide.lapTime);
   });

@@ -221,8 +221,8 @@ export function edgePoints(
 
 // ── Integrator bridge ─────────────────────────────────────────────────────────
 
-export function centreSamplesToTrackPoints(samples: CentreSample[]): TrackPoint[] {
-  return samples.map(s => ({ distance: s.distance, radius: s.radius }));
+export function centreSamplesToTrackPoints(samples: CentreSample[], hw?: Float64Array): TrackPoint[] {
+  return samples.map((s, i) => ({ distance: s.distance, radius: s.radius, x: s.x, y: s.y, tangentAngle: s.tangentAngle, halfWidth: hw?.[i] }));
 }
 
 // ── Racing line optimisation ──────────────────────────────────────────────────
@@ -231,6 +231,7 @@ export interface RacingLineSample {
   x: number; y: number;
   distance: number;
   radius: number;
+  tangentAngle: number;
 }
 
 export function racingLineFromOffsets(
@@ -251,7 +252,7 @@ export function racingLineFromOffsets(
   let dist = 0;
   for (let i = 0; i < n; i++) {
     if (i > 0) dist += len(sub(world[i], world[i - 1]));
-    line.push({ x: world[i].x, y: world[i].y, distance: dist, radius: Infinity });
+    line.push({ x: world[i].x, y: world[i].y, distance: dist, radius: Infinity, tangentAngle: 0 });
   }
 
   const rawK = new Float64Array(n);
@@ -277,6 +278,12 @@ export function racingLineFromOffsets(
     line[i].radius = Math.abs(kappa) < 1e-12 ? Infinity : 1 / kappa;
   }
 
+  for (let i = 0; i < n; i++) {
+    const prev = world[(i - 1 + n) % n];
+    const next = world[(i + 1) % n];
+    line[i].tangentAngle = Math.atan2(next.y - prev.y, next.x - prev.x);
+  }
+
   return line;
 }
 
@@ -288,7 +295,7 @@ export function optimiseRacingLine(
   segments: BezierSegment[],
 ): { samples: RacingLineSample[]; offsets: Float64Array } {
   const n = samples.length;
-  if (n < 3) return { samples: samples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius })), offsets: new Float64Array(n) };
+  if (n < 3) return { samples: samples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius, tangentAngle: s.tangentAngle })), offsets: new Float64Array(n) };
 
   // half-widths at each sample (interpolated between sections)
   const hw = samples.map(s => {
@@ -405,7 +412,9 @@ export function optimiseRacingLine(
         radius = Math.pow(Math.sqrt(dax*dax+day*day) * Math.sqrt(dbx*dbx+dby*dby), 1.5) / cr;
     }
 
-    result.push({ x, y, distance: dist, radius });
+    const prevPt = result[result.length - 1] ?? { x, y };
+    const tangentAngle = i > 0 ? Math.atan2(y - prevPt.y, x - prevPt.x) : samples[i].tangentAngle;
+    result.push({ x, y, distance: dist, radius, tangentAngle });
   }
 
   return { samples: result, offsets: smoothed };

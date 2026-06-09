@@ -6,6 +6,10 @@ export interface TrackSegment {
 export interface TrackPoint {
   distance: number; // cumulative distance from start (m)
   radius: number;   // local radius of curvature (m)
+  x?: number;
+  y?: number;
+  tangentAngle?: number;
+  halfWidth?: number;
 }
 
 export function buildTrackProfile(segments: TrackSegment[]): TrackPoint[] {

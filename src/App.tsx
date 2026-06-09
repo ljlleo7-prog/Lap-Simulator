@@ -146,14 +146,14 @@ export default function App() {
   const racingLine = useMemo((): RacingLineSample[] => {
     if (optOffsets && optOffsets.length === centreSamples.length)
       return racingLineFromOffsets(optOffsets, hw, centreSamples);
-    return centreSamples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius }));
+    return centreSamples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius, tangentAngle: s.tangentAngle }));
   }, [optOffsets, hw, centreSamples]);
 
   const trackPoints = useMemo(
     () => useOptLine
-      ? racingLine.map(s => ({ distance: s.distance, radius: s.radius }))
-      : centreSamplesToTrackPoints(centreSamples),
-    [useOptLine, racingLine, centreSamples],
+      ? racingLine.map((s, i) => ({ distance: s.distance, radius: s.radius, x: s.x, y: s.y, tangentAngle: s.tangentAngle, halfWidth: hw[i] }))
+      : centreSamplesToTrackPoints(centreSamples, hw),
+    [useOptLine, racingLine, centreSamples, hw],
   );
 
   const hasInvalid = segments.some(s => s.invalid);
@@ -204,7 +204,7 @@ export default function App() {
     if (trackPoints.length < 2) return;
     const { simulateGripTargetHotLap, simulateHotLap } = await import("./integrator.js");
     const r = simMode === "grip" ? simulateGripTargetHotLap(vehicle, trackPoints) : simulateHotLap(vehicle, trackPoints, hw, driftTolerance);
-    const lineSamples = useOptLine ? racingLine.map(s => ({ ...s })) : centreSamples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius }));
+    const lineSamples = useOptLine ? racingLine.map(s => ({ ...s })) : centreSamples.map(s => ({ x: s.x, y: s.y, distance: s.distance, radius: s.radius, tangentAngle: s.tangentAngle }));
     setSnapshot({
       result: r,
       lineSamples,
@@ -235,7 +235,7 @@ export default function App() {
     setOptOffsets(nextOffsets);
     setUseOptLine(true);
     const nextLine = racingLineFromOffsets(nextOffsets, hw, centreSamples);
-    const nextTrackPoints = nextLine.map(s => ({ distance: s.distance, radius: s.radius }));
+    const nextTrackPoints = nextLine.map((s, i) => ({ distance: s.distance, radius: s.radius, x: s.x, y: s.y, tangentAngle: s.tangentAngle, halfWidth: hw[i] }));
     const { simulateGripTargetHotLap, simulateHotLap } = await import("./integrator.js");
     const nextResult = simMode === "grip" ? simulateGripTargetHotLap(vehicle, nextTrackPoints) : simulateHotLap(vehicle, nextTrackPoints, hw, driftTolerance);
     setSnapshot({

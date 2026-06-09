@@ -87,6 +87,18 @@ function driftedPath(line: RacingLineSample[], lateralOffsets: Float64Array | un
   });
 }
 
+function actualResultPath(line: RacingLineSample[], result: SimResult | null): RacingLineSample[] {
+  if (!result?.actualXs || !result.actualYs || result.actualXs.length === 0)
+    return driftedPath(line, result?.lateralOffsets);
+  return Array.from(result.actualXs, (x, i) => ({
+    ...(line[i] ?? line[line.length - 1]),
+    x,
+    y: result.actualYs![i],
+    distance: result.actualDistances?.[i] ?? line[i]?.distance ?? i,
+    tangentAngle: result.actualHeadings?.[i] ?? (line[i] as RacingLineSample)?.tangentAngle ?? 0,
+  }));
+}
+
 function carPose(line: RacingLineSample[], index: number, alpha: number) {
   const n = line.length;
   if (n === 0 || index < 0) return null;
@@ -149,9 +161,7 @@ export function TrackCanvas({
 
   const activeLine = useOptLine ? racingLine : centreSamples;
   const requestedLine: RacingLineSample[] = activeLine;
-  const driftLine: RacingLineSample[] = (result && result.lateralOffsets)
-    ? driftedPath(activeLine, result.lateralOffsets)
-    : activeLine;
+  const driftLine: RacingLineSample[] = result ? actualResultPath(activeLine, result) : activeLine;
   const HOVER_THRESHOLD_SQ = (vb.w * 0.015) ** 2;
 
   const sectionsRef = useRef(sections);
@@ -326,7 +336,7 @@ export function TrackCanvas({
   const invalidSet = new Set(segments.map((seg, i) => seg.invalid ? i : -1).filter(i => i >= 0));
   const u = Math.max(vb.w, vb.h);
   const circleR = u * 0.08;
-  const playbackDisplayLine = pathDisplay === "intended" ? playbackLine : driftedPath(playbackLine, result?.lateralOffsets);
+  const playbackDisplayLine = pathDisplay === "intended" ? playbackLine : actualResultPath(playbackLine, result);
   const pose = carPose(playbackDisplayLine, playbackIndex, playbackAlpha);
   const telemetryIndex = playbackActive ? playbackIndex : hover?.sampleIndex ?? -1;
   const telemetryLine = playbackActive ? playbackDisplayLine : pathDisplay === "intended" ? requestedLine : driftLine;

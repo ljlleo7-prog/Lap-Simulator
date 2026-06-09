@@ -21,6 +21,10 @@ describe("offsetsToTrackPoints", () => {
     const finite = points.filter(p => p.radius < Infinity);
 
     expect(finite.length).toBeGreaterThan(0);
+    expect(points[0].x).toBeDefined();
+    expect(points[0].y).toBeDefined();
+    expect(points[0].tangentAngle).toBeDefined();
+    expect(points[0].halfWidth).toBe(4);
     expect(Math.min(...finite.map(p => Math.abs(p.radius)))).toBeGreaterThan(1000);
   });
 
